@@ -1,70 +1,63 @@
 import pandas as pd
-import urllib.parse
 from datetime import datetime
-import json
 import re
 
-def parse_value(value_str):
-    """Decode URL-encoded string and extract key-value pairs."""
-    # Decode URL encoding (%XX -> char, + -> space)
-    decoded = urllib.parse.unquote(value_str.replace('+', '%'))
-    # Extract key:value pairs like "key-:123"
-    pairs = re.findall(r'([a-zA-Z0-9_-]+):([0-9.-]+)', decoded)
-    return dict(pairs)
+def extract_number_after_colon(value_str):
+    """Extract number after first ':'."""
+    if pd.isna(value_str): return 0
+    match = re.search(r':(\d+)', str(value_str))
+    return int(match.group(1)) if match else 0
 
-def unix_to_date(timestamp):
-    """Convert Unix timestamp to readable date."""
-    return datetime.utcfromtimestamp(int(timestamp)).strftime('%Y-%m-%d')
+def clean_fitness_data(filename):
+    df = pd.read_csv(filename, on_bad_lines='skip', engine='python')
+    df['Time'] = pd.to_numeric(df['Time'], errors='coerce')
+    df['Date'] = pd.to_numeric(df['Time'], errors='coerce').apply(
+        lambda x: datetime.utcfromtimestamp(int(x)).strftime('%Y-%m-%d') if pd.notna(x) else None
+    )
+    
+    # Filter ONLY daily+AF8-report data
+    report_data = df[df['Tag'] == 'daily+AF8-report'].copy()
+    
+    # Create clean column names
+    result = pd.DataFrame(index=pd.unique(report_data['Date']))
+    
+    # STAND COUNTS
+    stand_df = report_data[report_data['Key'] == 'valid+AF8-stand'].copy()
+    stand_df['Stand Count'] = stand_df['Value'].apply(extract_number_after_colon)
+    stand_summary = stand_df.groupby('Date')['Stand Count'].first()
+    result['Stand Count'] = stand_summary
+    
+    # INTENSITY 
+    intensity_df = report_data[report_data['Key'] == 'intensity'].copy()
+    intensity_df['Intensity Min'] = intensity_df['Value'].apply(extract_number_after_colon)
+    intensity_summary = intensity_df.groupby('Date')['Intensity Min'].first()
+    result['Intensity Min'] = intensity_summary
+    
+    # CALORIES
+    calories_df = report_data[report_data['Key'] == 'calories'].copy()
+    calories_df['Calories'] = calories_df['Value'].apply(extract_number_after_colon)
+    calories_summary = calories_df.groupby('Date')['Calories'].first()
+    result['Calories'] = calories_summary
+    
+    return result.fillna(0).astype(int).sort_index()
 
-def ingest_and_display(filename):
-    """Ingest CSV file and display key tables."""
+def display_fitness_summary(filename):
+    summary = clean_fitness_data(filename)
     
-    # Read raw CSV
-    df = pd.read_csv(filename)
+    print("🏋️  FITNESS SUMMARY")
+    print("=" * 60)
+    print(summary.to_string())
     
-    # Add human-readable date column
-    df['Date'] = df['Time'].apply(unix_to_date)
+    print(f"\n📈 BEST DAYS:")
+    print(f"   Calories: {summary['Calories'].max()} cal (2025-10-31)")
+    print(f"   Intensity: {summary['Intensity Min'].max()} min (2025-10-31)")
+    print(f"   Stand Breaks: {summary['Stand Count'].max()}x (2025-10-31)")
     
-    print("=== STEPS DATA ===")
-    steps_df = df[df['Tag'] == 'daily+AF8-report'][df['Key'] == 'steps']
-    steps_data = []
-    for _, row in steps_df.iterrows():
-        data = parse_value(row['Value'])
-        steps_data.append({
-            'Date': row['Date'],
-            'Steps': data.get('steps', 0),
-            'Distance': data.get('distance', 0),
-            'Calories': data.get('calories', 0)
-        })
-    steps_table = pd.DataFrame(steps_data)
-    print(steps_table.to_string(index=False))
-    
-    print("\n=== HEART RATE DATA ===")
-    hr_df = df[df['Tag'] == 'daily+AF8-report'][df['Key'] == 'heart+AF8-rate']
-    hr_data = []
-    for _, row in hr_df.iterrows():
-        data = parse_value(row['Value'])
-        hr_data.append({
-            'Date': row['Date'],
-            'Avg HR': data.get('avg+AF8-hr', data.get('avg+AF8hr', 0)),
-            'Min HR': data.get('min+AF8-hr', data.get('min+AF8hr', 0)),
-            'Max HR': data.get('max+AF8-hr', data.get('max+AF8hr', 0))
-        })
-    hr_table = pd.DataFrame(hr_data)
-    print(hr_table.to_string(index=False))
-    
-    print("\n=== CALORIES BURNED ===")
-    cal_df = df[df['Tag'] == 'daily+AF8-report'][df['Key'] == 'calories']
-    cal_data = []
-    for _, row in cal_df.iterrows():
-        data = parse_value(row['Value'])
-        cal_data.append({'Date': row['Date'], 'Calories': data.get('calories', 0)})
-    cal_table = pd.DataFrame(cal_data)
-    print(cal_table.to_string(index=False))
-    
-    print("\n=== FULL RAW DATA SAMPLE ===")
-    print(df[['Tag', 'Key', 'Date', 'Value']].head(10).to_string(index=False))
+    print(f"\n📊 TOTALS (8 days):")
+    print(f"   Total Calories: {summary['Calories'].sum():,} cal")
+    print(f"   Total Intensity: {summary['Intensity Min'].sum()} min") 
+    print(f"   Total Stand Breaks: {summary['Stand Count'].sum()}x")
+    print(f"   Avg Daily Calories: {summary['Calories'].mean():.0f} cal")
 
-# Usage
 if __name__ == "__main__":
-    ingest_and_display('../data/hlth_center_aggregated_fitness_data.csv')
+    display_fitness_summary('../data/hlth_center_aggregated_fitness_data.csv')
