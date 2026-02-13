@@ -1,18 +1,23 @@
+#!/usr/bin/env python3
+"""
+T-Echo client - sends device entity to WorldService at localhost:5051
+"""
+
 import grpc
 import world_pb2
 import world_pb2_grpc
 
 def main():
-    # 1. Connect to localhost:5051
+    # Connect to server
     channel = grpc.insecure_channel("localhost:5051")
     stub = world_pb2_grpc.WorldServiceStub(channel)
     
-    # 2. Prepopulate Entity (Frankfurt drone example)
+    # ✅ CORRECT: Use top-level SerialDevice (NOT nested)
     entity = world_pb2.Entity(
         id="lilygo-techo-001",
         label="T-Echo Drone Node",
         geo=world_pb2.GeoSpatialComponent(
-            longitude=8.6821,
+            longitude=8.6821,    # Frankfurt
             latitude=50.1109,
             altitude=100.0
         ),
@@ -20,7 +25,8 @@ def main():
             unique_hardware_id="nRF52840:ABC123",
             labels={
                 "node": "techo-node",
-                "role": "sensor"
+                "role": "sensor",
+                "location": "frankfurt"
             },
             serial=world_pb2.SerialDevice(
                 path="/dev/ttyACM0",
@@ -30,11 +36,12 @@ def main():
         priority=world_pb2.PriorityRoutine
     )
     
-    # 3. Send via Push RPC (EntityChangeRequest contains changes)
+    # Send via Push RPC
     request = world_pb2.EntityChangeRequest(changes=[entity])
     response = stub.Push(request)
     
-    print("Server response:", response)
+    print("✅ T-Echo entity sent!")
+    print(f"Server response: {response.debug}")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

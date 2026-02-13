@@ -45,4 +45,61 @@ python client.py
 
 snap install --edge grpcurl
 
-[]
+
+pip install grpcio grpcio-tools grpcio-reflection
+
+
+--
+
+grpcurl -plaintext localhost:5051 list
+
+
+--
+
+grpcurl -plaintext localhost:5051 world.WorldService/GetLocalNode
+
+--
+
+grpcurl -plaintext -d '{"id": "lilygo-techo-001"}' localhost:5051 world.WorldService/GetEntity
+
+grpcurl -plaintext -d '{"id": "lilygo-techo-001"}' localhost:5051 world.WorldService/GetEntity
+{
+  "entity": {
+    "id": "lilygo-techo-001",
+    "label": "T-Echo Drone Node",
+    "priority": "PriorityRoutine",
+    "geo": {
+      "longitude": 8.6821,
+      "latitude": 50.1109,
+      "altitude": 100
+    },
+    "device": {
+      "unique_hardware_id": "nRF52840:ABC123",
+      "labels": {
+        "node": "techo-node",
+        "role": "sensor"
+      },
+      "serial": {
+        "path": "/dev/ttyACM0",
+        "baud_rate": 115200
+      }
+    }
+  }
+}
+
+
+---
+
+
+# Terminal 1
+pip install grpcio-reflection  # if not installed
+python server.py
+
+# Terminal 2  
+python client.py
+
+# Terminal 3
+grpcurl -plaintext localhost:5051 world.WorldService/GetLocalNode
+grpcurl -plaintext -d '{"id": "lilygo-techo-001"}' localhost:5051 world.WorldService/GetEntity
+grpcurl -plaintext -d '{"filter": {}}' localhost:5051 world.WorldService/ListEntities
+
