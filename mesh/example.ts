@@ -5,7 +5,7 @@ import { createConnectTransport } from "@connectrpc/connect-web";
 
 // Create an entity
 const entity = create(EntitySchema, {
-  id: "sensor-1",
+  id: "sensor-sachin",
   geo: {
     latitude: 52.52,
     longitude: 13.40,
