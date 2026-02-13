@@ -2,7 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    alias(libs.plugins.protobuf)  // Add this
+    alias(libs.plugins.protobuf)
 }
 
 android {
@@ -49,11 +49,11 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
-
-    // Add USB Serial and Protobuf
+    
+    // USB Serial and Protobuf
     implementation(libs.usb.serial)
     implementation(libs.protobuf.javalite)
-
+    
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -63,7 +63,6 @@ dependencies {
     debugImplementation(libs.androidx.ui.test.manifest)
 }
 
-// Add protobuf configuration
 protobuf {
     protoc {
         artifact = "com.google.protobuf:protoc:3.25.5"

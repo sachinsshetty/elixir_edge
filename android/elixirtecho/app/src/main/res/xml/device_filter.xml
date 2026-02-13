@@ -1,16 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- LilyGO T-Echo nRF52840 + Meshtastic USB CDC ACM -->
-    <!-- VID:PID 0x1915:0x521F (Nordic Semi nRF52840 default CDC ACM) -->
-    <usb-device vendor-id="6421" product-id="21007" />
-
-    <!-- Generic CDC ACM fallback for any nRF52 Meshtastic device -->
-    <usb-device class="2" subclass="2" protocol="1" />
-
-    <!-- Nordic nRF52840 USB serial devices (common VID/PID combinations) -->
-    <usb-device vendor-id="0x1915" product-id="0x521F" />
+    <!-- LilyGO T-Echo nRF52840 CDC ACM -->
+    <usb-device vendor-id="0x1915" product-id="0x521f" />
     <usb-device vendor-id="0x239A" product-id="0x0045" />
-
-    <!-- Fallback: any Communications class device -->
+    
+    <!-- Generic CDC ACM fallback -->
+    <usb-device class="2" subclass="2" protocol="1" />
     <usb-device class="2" />
 </resources>

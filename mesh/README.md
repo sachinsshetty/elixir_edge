@@ -4,7 +4,8 @@ Meshtactic - Project Q
 docker run -p 50051:50051 --device /dev/ttyACM0 -ti ghcr.io/projectqai/hydris:v0.0.18  --allow-local-serial
 
 
-
+-- 
+ docker run -p 50051:50051  -ti ghcr.io/projectqai/hydris:v0.0.18
 
 - Verify Radio Mesh
 pip install meshtastic
