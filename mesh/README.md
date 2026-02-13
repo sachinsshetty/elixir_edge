@@ -1,17 +1,7 @@
-Meshtactic
-
-Project Q : Data Transfer
-
-https://meshtastic.org/docs/hardware/devices/lilygo/techo/
-
-https://github.com/Xinyuan-LilyGO/T-Echo
+Meshtactic - Project Q
 
 
-https://projectqai.github.io/
-
-
-
-
+- Verify Radio Mesh
 pip install meshtastic
 
 sudo chmod a+rw /dev/ttyACM0
@@ -20,12 +10,8 @@ meshtastic --port /dev/ttyACM0 --info
 
 meshtastic --port /dev/ttyACM0 --send "hello from Sachin"
 
+-- Setup Project Q - Hydris 
 
-
-
---
-
-# In some project directory
 mkdir -p proto && cd proto
 wget https://raw.githubusercontent.com/projectqai/proto/main/world.proto
 
@@ -39,15 +25,40 @@ chmod +x hydris-linux-amd64-v0.0.18
 
 ./hydris-linux-amd64-v0.0.18 --allow-local-serial
 
----
+--- 
 
-
-
----
+Send message to Server
 
 curl -fsSL https://bun.sh/install | bash
 
 bun example.ts
+
+--- 
+
+
+- Reference 
+Project Q : Data Transfer
+
+https://meshtastic.org/docs/hardware/devices/lilygo/techo/
+
+https://github.com/Xinyuan-LilyGO/T-Echo
+
+
+https://projectqai.github.io/
+
+
+
+
+
+
+
+
+--
+---
+
+
+
+---
 
 
 --
