@@ -7,6 +7,9 @@ https://meshtastic.org/docs/hardware/devices/lilygo/techo/
 https://github.com/Xinyuan-LilyGO/T-Echo
 
 
+https://projectqai.github.io/
+
+
 
 
 pip install meshtastic
@@ -18,7 +21,13 @@ meshtastic --port /dev/ttyACM0 --info
 meshtastic --port /dev/ttyACM0 --send "hello from Sachin"
 
 --
+npm install -D tsx
+npx tsx test.ts
 
+
+
+
+--
 
 # In some project directory
 mkdir -p proto && cd proto
@@ -26,6 +35,12 @@ wget https://raw.githubusercontent.com/projectqai/proto/main/world.proto
 
 
 ---
+
+docker run -p 50051:50051 -ti ghcr.io/projectqai/hydris:v0.0.18
+
+---
+
+
 
 pip install grpcio grpcio-tools
 
@@ -37,6 +52,10 @@ python -m grpc_tools.protoc \
   --grpc_python_out=. \
   world.proto
 
+---
+npm install @projectqai/proto @bufbuild/protobuf @connectrpc/connect @connectrpc/connect-web
+
+npx tsc client.ts
 ---
 
 python server.py
