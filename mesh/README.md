@@ -20,10 +20,6 @@ meshtastic --port /dev/ttyACM0 --info
 
 meshtastic --port /dev/ttyACM0 --send "hello from Sachin"
 
---
-npm install -D tsx
-npx tsx test.ts
-
 
 
 
@@ -34,11 +30,27 @@ mkdir -p proto && cd proto
 wget https://raw.githubusercontent.com/projectqai/proto/main/world.proto
 
 
+
+-- Hydris Server 
+
+wget https://github.com/projectqai/hydris/releases/download/v0.0.18/hydris-linux-amd64-v0.0.18
+
+chmod +x hydris-linux-amd64-v0.0.18
+
+./hydris-linux-amd64-v0.0.18 --allow-local-serial
+
 ---
 
-docker run -p 50051:50051 -ti ghcr.io/projectqai/hydris:v0.0.18
+
 
 ---
+
+curl -fsSL https://bun.sh/install | bash
+
+bun example.ts
+
+
+--
 
 
 
