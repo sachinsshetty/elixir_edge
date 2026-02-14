@@ -95,12 +95,25 @@ def assign_risk_and_recommendation(row) -> tuple[str, str]:
     return risk, rec
 
 
+def synthetic_examples() -> list[dict]:
+    """Add synthetic examples so all three risk levels appear in training (red was missing)."""
+    return [
+        {"text": "HR average 65 bpm HR max 82 resting HR 55 SpO2 98 percent steps 1500 active 5 minutes sleep 7h", "risk_level": "green", "recommendation": "Continue normal activity. Stay hydrated."},
+        {"text": "HR average 70 bpm HR max 90 SpO2 97 percent steps 2000 sleep 6h", "risk_level": "green", "recommendation": "Continue normal activity. Stay hydrated."},
+        {"text": "HR average 108 bpm HR max 125 SpO2 87 percent steps 8000 active 50 minutes sleep 0h", "risk_level": "red", "recommendation": "Heat stress or fatigue risk. Rest and rehydrate. Seek shade. Recommend rest in 10 min."},
+        {"text": "HR average 105 bpm HR max 122 SpO2 88 percent active 45 minutes", "risk_level": "red", "recommendation": "Heat stress or fatigue risk. Rest and rehydrate. Seek shade. Recommend rest in 10 min."},
+        {"text": "HR average 102 bpm HR max 118 SpO2 89 percent steps 7000 sleep 0h30m", "risk_level": "red", "recommendation": "Heat stress or fatigue risk. Rest and rehydrate. Seek shade. Recommend rest in 10 min."},
+    ]
+
+
 def build_dataset(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, row in df.iterrows():
         text = vitals_to_text(row)
         risk, rec = assign_risk_and_recommendation(row)
         rows.append({"text": text, "risk_level": risk, "recommendation": rec})
+    # Append synthetic examples so red (and clear green) are present for training
+    rows.extend(synthetic_examples())
     return pd.DataFrame(rows)
 
 

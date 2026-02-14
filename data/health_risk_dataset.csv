@@ -16,3 +16,8 @@ HR average 80 bpm HR max 100 bpm resting HR 68 bpm steps 3021 active 18 minutes 
 HR average 73 bpm HR max 105 bpm resting HR 64 bpm steps 3189 active 13 minutes calories 309,yellow,Monitor vital signs. Consider rest and hydration soon.
 HR average 82 bpm HR max 100 bpm resting HR 71 bpm steps 2968 active 15 minutes calories 405,green,Continue normal activity. Stay hydrated.
 HR average 85 bpm HR max 107 bpm resting HR 76 bpm steps 2006 active 9 minutes calories 246,yellow,Monitor vital signs. Consider rest and hydration soon.
+HR average 65 bpm HR max 82 resting HR 55 SpO2 98 percent steps 1500 active 5 minutes sleep 7h,green,Continue normal activity. Stay hydrated.
+HR average 70 bpm HR max 90 SpO2 97 percent steps 2000 sleep 6h,green,Continue normal activity. Stay hydrated.
+HR average 108 bpm HR max 125 SpO2 87 percent steps 8000 active 50 minutes sleep 0h,red,Heat stress or fatigue risk. Rest and rehydrate. Seek shade. Recommend rest in 10 min.
+HR average 105 bpm HR max 122 SpO2 88 percent active 45 minutes,red,Heat stress or fatigue risk. Rest and rehydrate. Seek shade. Recommend rest in 10 min.
+HR average 102 bpm HR max 118 SpO2 89 percent steps 7000 sleep 0h30m,red,Heat stress or fatigue risk. Rest and rehydrate. Seek shade. Recommend rest in 10 min.
