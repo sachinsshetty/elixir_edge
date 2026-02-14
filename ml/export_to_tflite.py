@@ -296,68 +296,59 @@ def export_keras_for_mediapipe() -> bool:
     return True
 
 
+def _get_tflite_input_names(model_buffer: bytearray) -> tuple:
+    """Return (ids_name, mask_name, segment_name) from the TFLite model (order may vary)."""
+    try:
+        from tensorflow_lite_support.metadata.python.metadata_writers import writer_utils
+    except ImportError:
+        return (INPUT_IDS_NAME, INPUT_MASK_NAME, INPUT_SEGMENT_IDS_NAME)
+    names = writer_utils.get_input_tensor_names(model_buffer)
+    # Map by suffix so we find ids, mask, segment_ids regardless of prefix (e.g. serving_default_*:0)
+    by_key = {}
+    for n in names:
+        n_lower = n.lower()
+        if "ids" in n_lower and "segment" not in n_lower and "mask" not in n_lower:
+            by_key["ids"] = n
+        elif "mask" in n_lower:
+            by_key["mask"] = n
+        elif "segment" in n_lower:
+            by_key["segment"] = n
+    return (
+        by_key.get("ids", names[0] if len(names) > 0 else INPUT_IDS_NAME),
+        by_key.get("mask", names[1] if len(names) > 1 else INPUT_MASK_NAME),
+        by_key.get("segment", names[2] if len(names) > 2 else INPUT_SEGMENT_IDS_NAME),
+    )
+
+
 def _attach_mediapipe_metadata(
     tflite_path: Path, vocab_path: Path, labels_path: Path, out_path: Path
 ) -> bool:
-    """Attach TFLite metadata (BERT tokenizer + output labels) and pack associated files. Returns True if done."""
+    """Attach TFLite metadata (BERT tokenizer + output labels) so MediaPipe TextClassifier accepts the model."""
     try:
-        from tflite_support import metadata
-        from tflite_support import metadata_schema_py_generated as schema
+        from tensorflow_lite_support.metadata.python.metadata_writers import bert_nl_classifier
+        from tensorflow_lite_support.metadata.python.metadata_writers import metadata_info
     except ImportError:
         return False
 
-    # Populator may modify in place; work on a copy so we don't alter base_tflite
-    shutil.copy(tflite_path, out_path)
-
-    # Build metadata: subgraph with output label file + input BERT tokenizer
-    model_meta = schema.ModelMetadataT()
-    model_meta.name = "Health risk classifier"
-    model_meta.description = "Green/yellow/red risk from vital-sign text (HR, SpO2, steps, etc.)"
-    model_meta.version = "1.0"
-    model_meta.author = "Elixir Edge"
-    model_meta.license = ""
-
-    subgraph = schema.SubGraphMetadataT()
-    subgraph.input_tensor_metadata = []
-    subgraph.output_tensor_metadata = []
-
-    # Output tensor: logits with TENSOR_AXIS_LABELS
-    out_meta = schema.TensorMetadataT()
-    out_meta.name = OUTPUT_LOGITS_NAME
-    out_meta.description = "Logits for green, yellow, red"
-    out_meta.content = schema.ContentT()
-    out_meta.content.content_properties = schema.FeaturePropertiesT()
-    label_file = schema.AssociatedFileT()
-    label_file.name = "labels.txt"
-    label_file.description = "Risk level labels"
-    label_file.type = schema.AssociatedFileType.TENSOR_AXIS_LABELS
-    out_meta.associated_files = [label_file]
-    subgraph.output_tensor_metadata = [out_meta]
-
-    # Input process unit: BERT tokenizer with vocab (so MediaPipe can tokenize raw text)
-    vocab_af = schema.AssociatedFileT()
-    vocab_af.name = "vocab.txt"
-    vocab_af.description = "WordPiece vocabulary"
-    vocab_af.type = schema.AssociatedFileType.VOCABULARY
-    bert_opts = schema.BertTokenizerOptionsT()
-    bert_opts.vocab_file = [vocab_af]
-    process_unit = schema.ProcessUnitT()
-    process_unit.options = bert_opts
-    subgraph.input_process_units = [process_unit]
-
-    model_meta.subgraph_metadata = [subgraph]
-
+    model_buffer = bytearray(tflite_path.read_bytes())
+    ids_name, mask_name, segment_name = _get_tflite_input_names(model_buffer)
+    tokenizer_md = metadata_info.BertTokenizerMd(vocab_file_path="vocab.txt")
     try:
-        builder = schema.ModelMetadataCreateFromT(model_meta)
-        metadata_buf = bytes(builder.Finish())
-    except AttributeError:
-        # Schema API may differ; try alternate construction
+        writer = bert_nl_classifier.MetadataWriter.create_for_inference(
+            model_buffer,
+            tokenizer_md=tokenizer_md,
+            label_file_paths=[str(labels_path)],
+            ids_name=ids_name,
+            mask_name=mask_name,
+            segment_name=segment_name,
+        )
+    except ValueError as e:
+        print("Metadata attachment failed:", e, file=sys.stderr)
         return False
 
-    populator = metadata.MetadataPopulator.with_model_file(str(out_path))
-    populator.load_metadata_buffer(metadata_buf)
-    populator.load_associated_files([str(labels_path), str(vocab_path)])
-    populator.populate()
+    writer._associated_files = [str(labels_path), str(vocab_path)]
+    populated = writer.populate()
+    out_path.write_bytes(populated)
     return True
 
 
