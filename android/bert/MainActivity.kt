@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,6 +29,9 @@ import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import com.hoho.android.usbserial.util.SerialInputOutputManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.meshtastic.proto.MeshProtos
@@ -35,22 +39,12 @@ import org.meshtastic.proto.Portnums
 import java.io.IOException
 import java.util.*
 
-// REMOVED: import org.meshtastic.proto.world.World (Causes unresolved reference)
-
-data class ReceivedMessage(
-    val from: String,
-    val text: String,
-    val timestamp: Long,
-    val isFromMe: Boolean = false
-)
-
 class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
 
     private var serialPort: UsbSerialPort? = null
     private var ioManager: SerialInputOutputManager? = null
+    private var heartbeatJob: Job? = null
     private val framer = MeshtasticFramer()
-
-    // AI Manager (MobileBERT)
     private lateinit var aiManager: TextClassifierManager
 
     // UI State
@@ -58,17 +52,22 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
     private var logText by mutableStateOf("")
     private var isConnected by mutableStateOf(false)
     private var myNodeNum by mutableStateOf<Int?>(null)
-    private var receivedMessages by mutableStateOf(listOf<ReceivedMessage>())
 
-    // AI State
+    // Health + AI State
     private var isModelLoading by mutableStateOf(false)
     private var isModelReady by mutableStateOf(false)
-    private var aiPromptText by mutableStateOf("")
-    private var aiResponseText by mutableStateOf("")
-    private var isGenerating by mutableStateOf(false)
+    private var healthInputText by mutableStateOf("")
+    private var lastAiLevel by mutableStateOf("")
+    private var isSending by mutableStateOf(false)
 
     private val ACTION_USB_PERMISSION = "com.slabstech.health.elixir_t_echo.USB_PERMISSION"
     private val TAG = "TechoApp"
+    private val MAX_LOG_CHARS = 50_000
+
+    companion object {
+        val PEOPLE = listOf("Person 1", "Person 2", "Person 3")
+    }
+    private var selectedPersonIndex by mutableStateOf(0)
 
     private val usbPermissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -88,7 +87,6 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
                         }
                     } else {
                         setStatus("USB permission denied")
-                        log("USB permission denied")
                     }
                 }
             }
@@ -104,7 +102,7 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
             isModelLoading = true
             isModelReady = aiManager.loadModel()
             isModelLoading = false
-            if (isModelReady) log("AI Model loaded") else log("AI Model failed")
+            if (isModelReady) log("AI model loaded") else log("AI model failed")
         }
 
         val filter = IntentFilter(ACTION_USB_PERMISSION)
@@ -122,28 +120,18 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
                     logText = logText,
                     isConnected = isConnected,
                     myNodeNum = myNodeNum,
-                    receivedMessages = receivedMessages,
-
+                    people = PEOPLE,
+                    selectedPersonIndex = selectedPersonIndex,
+                    onPersonSelect = { selectedPersonIndex = it },
+                    healthInput = healthInputText,
+                    onHealthInputChange = { healthInputText = it },
+                    lastAiLevel = lastAiLevel,
                     isModelLoading = isModelLoading,
                     isModelReady = isModelReady,
-                    aiPrompt = aiPromptText,
-                    aiResponse = aiResponseText,
-                    isGenerating = isGenerating,
-                    onAiPromptChange = { aiPromptText = it },
-                    onGenerateAiResponse = { generateAiAnalysis() },
-
+                    isSending = isSending,
+                    onClassifyAndSend = { classifyAndSendToMesh() },
                     onConnect = { findAndRequestUsbPermission() },
-                    onDisconnect = { disconnect() },
-                    onSendMessage = { msg -> sendTextMessage(msg) },
-                    onSendWorldEntity = {
-                        // sendWorldEntity() // DISABLED due to missing proto
-                        log("World Entity disabled")
-                    },
-                    onSendSensorEntity = {
-                        // sendSensorEntity() // DISABLED due to missing proto
-                        log("Sensor Entity disabled")
-                    },
-                    onClearMessages = { receivedMessages = emptyList() }
+                    onDisconnect = { disconnect() }
                 )
             }
         }
@@ -151,13 +139,22 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
         intent?.let { handleIntent(it) }
     }
 
-    private fun generateAiAnalysis() {
-        if (aiPromptText.isBlank() || !isModelReady) return
-        isGenerating = true
-        aiResponseText = ""
+    private fun classifyAndSendToMesh() {
+        val input = healthInputText.trim()
+        if (input.isBlank() || !isModelReady || !isConnected) {
+            log(if (!isConnected) "Connect device first" else "Enter health parameters")
+            return
+        }
+        isSending = true
+        lastAiLevel = ""
         lifecycleScope.launch {
-            aiManager.classify(aiPromptText).collect { aiResponseText = it }
-            isGenerating = false
+            var aiResult = ""
+            aiManager.classify(input).collect { aiResult = it }
+            lastAiLevel = aiResult
+            val personName = PEOPLE.getOrNull(selectedPersonIndex) ?: PEOPLE.first()
+            val message = "Person: $personName | Health: $input | Level: ${aiResult.replace("\n", " ").trim()}"
+            sendToMesh(message)
+            isSending = false
         }
     }
 
@@ -172,7 +169,6 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
 
     private fun handleIntent(intent: Intent) {
         if (UsbManager.ACTION_USB_DEVICE_ATTACHED == intent.action) {
-            log("USB device attached")
             findAndRequestUsbPermission()
         }
     }
@@ -204,12 +200,14 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
                 val port = driver.ports.firstOrNull() ?: return@launch
                 port.open(connection)
                 port.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+                framer.reset()
                 serialPort = port
                 ioManager = SerialInputOutputManager(port, this@MainActivity).also { it.start() }
                 withContext(Dispatchers.Main) {
                     isConnected = true
                     setStatus("Connected")
                     requestDeviceConfig()
+                    startHeartbeat()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { setStatus("Error: ${e.message}") }
@@ -226,7 +224,7 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
         } catch (_: Exception) {}
     }
 
-    private fun sendTextMessage(text: String) {
+    private fun sendToMesh(text: String) {
         if (text.isBlank()) return
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -242,9 +240,9 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
                     .build()
                 val toRadio = MeshProtos.ToRadio.newBuilder().setPacket(packet).build()
                 sendToRadio(toRadio)
-                withContext(Dispatchers.Main) { log("Sent: $text") }
+                withContext(Dispatchers.Main) { if (!isDestroyed) log("Sent to mesh: $text") }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { log("Send failed") }
+                withContext(Dispatchers.Main) { if (!isDestroyed) log("Send failed: ${e.message}") }
             }
         }
     }
@@ -256,32 +254,49 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
             val framed = framer.frame(payload)
             port.write(framed, 1000)
         } catch (e: IOException) {
-            runOnUiThread { log("Write error") }
+            runOnUiThread { if (!isDestroyed) log("Write error") }
         }
     }
 
     override fun onNewData(data: ByteArray) {
+        if (data.isEmpty()) return
+        // PROTO mode: framed FromRadio packets
         framer.feed(data) { payload ->
             try {
                 val fromRadio = MeshProtos.FromRadio.parseFrom(payload)
-                runOnUiThread { handleFromRadio(fromRadio) }
-            } catch (_: Exception) {}
+                runOnUiThread {
+                    if (!isDestroyed) handleFromRadio(fromRadio)
+                }
+            } catch (e: Exception) {
+                if (!isDestroyed) runOnUiThread { log("Rx parse error: ${e.message}") }
+            }
         }
     }
 
     override fun onRunError(e: Exception) {
-        runOnUiThread { disconnectInternal(true) }
+        runOnUiThread {
+            if (!isDestroyed) disconnectInternal(true)
+        }
     }
 
     private fun handleFromRadio(fromRadio: MeshProtos.FromRadio) {
+        if (isDestroyed) return
         if (fromRadio.hasMyInfo()) myNodeNum = fromRadio.myInfo.myNodeNum
-        if (fromRadio.hasPacket()) {
-            val packet = fromRadio.packet
-            if (packet.hasDecoded() && packet.decoded.portnum == Portnums.PortNum.TEXT_MESSAGE_APP) {
-                val text = packet.decoded.payload.toStringUtf8()
-                val fromNode = "0x${packet.from.toString(16)}"
-                val msg = ReceivedMessage(fromNode, text, System.currentTimeMillis(), false)
-                receivedMessages = receivedMessages + msg
+    }
+
+    private fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = lifecycleScope.launch(Dispatchers.IO) {
+            while (isActive && isConnected) {
+                delay(10_000L)
+                if (!isConnected) break
+                try {
+                    val toRadio = MeshProtos.ToRadio.newBuilder()
+                        .setHeartbeat(MeshProtos.Heartbeat.newBuilder().setNonce((System.currentTimeMillis() % 0xFFFF).toInt()).build())
+                        .build()
+                    sendToRadio(toRadio)
+                    Log.d(TAG, "Heartbeat sent")
+                } catch (_: Exception) {}
             }
         }
     }
@@ -289,6 +304,8 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
     private fun disconnect() { disconnectInternal(true) }
 
     private fun disconnectInternal(keepLog: Boolean) {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         try { ioManager?.stop() } catch (_: Exception) {}
         ioManager = null
         try { serialPort?.close() } catch (_: Exception) {}
@@ -301,41 +318,39 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
 
     private fun setStatus(s: String) { statusText = s }
     private fun log(message: String) {
+        if (isDestroyed) return
         val t = System.currentTimeMillis() % 100000
-        logText = "[$t] $message\n$logText"
+        logText = "[$t] $message\n$logText".take(MAX_LOG_CHARS)
+        Log.d(TAG, message)
     }
 }
 
-// ... [TechoScreen Composable remains the same as previous step] ...
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TechoScreen(
     statusText: String,
     logText: String,
     isConnected: Boolean,
     myNodeNum: Int?,
-    receivedMessages: List<ReceivedMessage>,
+    people: List<String>,
+    selectedPersonIndex: Int,
+    onPersonSelect: (Int) -> Unit,
+    healthInput: String,
+    onHealthInputChange: (String) -> Unit,
+    lastAiLevel: String,
     isModelLoading: Boolean,
     isModelReady: Boolean,
-    aiPrompt: String,
-    aiResponse: String,
-    isGenerating: Boolean,
-    onAiPromptChange: (String) -> Unit,
-    onGenerateAiResponse: () -> Unit,
+    isSending: Boolean,
+    onClassifyAndSend: () -> Unit,
     onConnect: () -> Unit,
-    onDisconnect: () -> Unit,
-    onSendMessage: (String) -> Unit,
-    onSendWorldEntity: () -> Unit,
-    onSendSensorEntity: () -> Unit,
-    onClearMessages: () -> Unit
+    onDisconnect: () -> Unit
 ) {
-    var messageText by remember { mutableStateOf("") }
-    var selectedTab by remember { mutableStateOf(0) }
-
+    var personDropdownExpanded by remember { mutableStateOf(false) }
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column {
-                    Text("TEcho Meshtastic", style = MaterialTheme.typography.headlineSmall)
+                    Text("Health → Mesh", style = MaterialTheme.typography.headlineSmall)
                     myNodeNum?.let { Text("Node: 0x${it.toString(16)}", style = MaterialTheme.typography.bodySmall) }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -345,48 +360,69 @@ fun TechoScreen(
             }
             Spacer(modifier = Modifier.height(10.dp))
             Text(statusText, style = MaterialTheme.typography.bodyMedium)
-            Spacer(modifier = Modifier.height(14.dp))
-            TabRow(selectedTabIndex = selectedTab) {
-                Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }, text = { Text("Chat") })
-                Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }, text = { Text("Log") })
-                Tab(selected = selectedTab == 2, onClick = { selectedTab = 2 }, text = { Text("AI") })
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            Surface(modifier = Modifier.fillMaxWidth().weight(1f), color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small) {
-                when (selectedTab) {
-                    0 -> {
-                        Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
-                            Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                                receivedMessages.forEach { msg -> Text("${msg.from}: ${msg.text}", modifier = Modifier.padding(4.dp)) }
-                            }
-                            Row {
-                                OutlinedTextField(value = messageText, onValueChange = { messageText = it }, modifier = Modifier.weight(1f))
-                                Button(onClick = { onSendMessage(messageText); messageText = "" }, enabled = isConnected) { Text("Send") }
-                            }
-                        }
-                    }
-                    1 -> Text(logText, modifier = Modifier.padding(10.dp).verticalScroll(rememberScrollState()), fontFamily = FontFamily.Monospace)
-                    2 -> {
-                        Column(modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
-                            if (isModelLoading) Text("Loading Model...")
-                            else if (isModelReady) {
-                                Text("MobileBERT Ready", color = Color.Green)
-                                Spacer(modifier = Modifier.height(8.dp))
-                                OutlinedTextField(value = aiPrompt, onValueChange = onAiPromptChange, label = { Text("Text to Analyze") }, modifier = Modifier.fillMaxWidth())
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Button(onClick = onGenerateAiResponse, enabled = !isGenerating && aiPrompt.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-                                    Text(if (isGenerating) "Analyzing..." else "Classify")
+            Spacer(modifier = Modifier.height(16.dp))
+            if (isModelLoading) {
+                Text("Loading AI model...", style = MaterialTheme.typography.bodyMedium)
+            } else if (!isModelReady) {
+                Text("AI model failed", color = MaterialTheme.colorScheme.error)
+            } else {
+                Text("Person", style = MaterialTheme.typography.labelMedium)
+                Spacer(modifier = Modifier.height(4.dp))
+                ExposedDropdownMenuBox(
+                    expanded = personDropdownExpanded,
+                    onExpandedChange = { personDropdownExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = people.getOrNull(selectedPersonIndex) ?: "",
+                        onValueChange = {},
+                        readOnly = true,
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = personDropdownExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = personDropdownExpanded,
+                        onDismissRequest = { personDropdownExpanded = false }
+                    ) {
+                        people.forEachIndexed { index, name ->
+                            DropdownMenuItem(
+                                text = { Text(name) },
+                                onClick = {
+                                    onPersonSelect(index)
+                                    personDropdownExpanded = false
                                 }
-                                if (aiResponse.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                    Text(aiResponse)
-                                }
-                            } else {
-                                Text("Model Error", color = Color.Red)
-                            }
+                            )
                         }
                     }
                 }
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = healthInput,
+                    onValueChange = onHealthInputChange,
+                    label = { Text("Health parameters (e.g. BP 120/80, HR 72)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = false,
+                    minLines = 2
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = onClassifyAndSend,
+                    enabled = isConnected && healthInput.isNotBlank() && !isSending,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (isSending) "Classifying & sending…" else "Classify & send to mesh")
+                }
+                if (lastAiLevel.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Last classification:", style = MaterialTheme.typography.labelMedium)
+                    Text(lastAiLevel, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("Log", style = MaterialTheme.typography.labelMedium)
+            Surface(modifier = Modifier.fillMaxWidth().weight(1f), color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small) {
+                Text(logText, modifier = Modifier.padding(10.dp).verticalScroll(rememberScrollState()), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
