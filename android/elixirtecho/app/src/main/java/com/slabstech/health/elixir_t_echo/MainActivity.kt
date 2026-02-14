@@ -115,6 +115,7 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
     private var isModelReady by mutableStateOf(false)
     private var healthInputText by mutableStateOf("")
     private var lastAiLevel by mutableStateOf("")
+    private var lastHealthPersonName by mutableStateOf("")
     private var isSending by mutableStateOf(false)
     private var showAlertDialog by mutableStateOf(false)
     private var alertDialogMessage by mutableStateOf("")
@@ -225,6 +226,7 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
             aiManager.classify(input).collect { aiResult = it }
             lastAiLevel = aiResult
             val personName = PEOPLE.getOrNull(selectedPersonIndex) ?: PEOPLE.first()
+            lastHealthPersonName = personName
             val (risk, _) = parseRiskFromAiResult(aiResult)
             val recommendation = getRecommendationForRisk(risk)
             val alert = risk == RISK_YELLOW || risk == RISK_RED
@@ -234,8 +236,8 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
             }
             val message = buildStructuredMessage(personName, input, risk, recommendation, alert)
             sendToMesh(message)
-            // Also send World entity (sensor name, GPS, and this health analysis) to mesh
-            sendWorldEntity()
+            // Also send World entity with random GPS; pass person + risk so label shows correct risk
+            sendWorldEntity(useRandomGps = true, overridePersonName = personName, overrideRisk = risk)
             isSending = false
         }
     }
@@ -329,18 +331,25 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
         }
     }
 
-    private fun sendWorldEntity() {
+    private fun sendWorldEntity(
+        useRandomGps: Boolean = false,
+        overridePersonName: String? = null,
+        overrideRisk: String? = null
+    ) {
         if (!isConnected) {
             log("Connect device first")
             return
         }
         val sensorId = worldSensorName.trim().ifBlank { "sensor-sachin-sachin" }
-        val parts = worldGpsText.split(",").map { it.trim() }
+        val gpsString = if (useRandomGps) randomBerlinSchonefeldGps() else worldGpsText
+        val parts = gpsString.split(",").map { it.trim() }
         val lat = parts.getOrNull(0)?.toDoubleOrNull() ?: 52.372
         val lon = parts.getOrNull(1)?.toDoubleOrNull() ?: 13.50
         val alt = parts.getOrNull(2)?.toDoubleOrNull() ?: 100.0
-        // Attach last health analysis when available (best-effort; don't block send)
-        val hasHealthAnalysis = lastAiLevel.isNotBlank()
+        // Health from classify flow (override) or from last run (lastAiLevel)
+        val hasHealthFromOverride = overridePersonName != null && overrideRisk != null
+        val hasHealthFromLast = lastAiLevel.isNotBlank()
+        val hasHealthAnalysis = hasHealthFromOverride || hasHealthFromLast
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val entityBuilder = World.Entity.newBuilder()
@@ -360,11 +369,18 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
                     .setPriority(World.Priority.PriorityRoutine)
                 if (hasHealthAnalysis) {
                     try {
-                        val (healthRisk, _) = parseRiskFromAiResult(lastAiLevel)
-                        val healthRecommendation = getRecommendationForRisk(healthRisk)
+                        val (healthRisk, healthRecommendation) = when {
+                            hasHealthFromOverride -> overrideRisk!! to getRecommendationForRisk(overrideRisk!!)
+                            else -> {
+                                val (risk, _) = parseRiskFromAiResult(lastAiLevel)
+                                risk to getRecommendationForRisk(risk)
+                            }
+                        }
                         val healthAlert = healthRisk == RISK_YELLOW || healthRisk == RISK_RED
-                        // Keep payload small for mesh (~231 bytes max): short label + compact labels
-                        entityBuilder.setLabel("Risk: $healthRisk")
+                        val personPart = (overridePersonName ?: lastHealthPersonName).trim().take(24)
+                        // Label: person-name and risk-level
+                        val label = if (personPart.isNotEmpty()) "$personPart · $healthRisk" else healthRisk
+                        entityBuilder.setLabel(label)
                         val recShort = healthRecommendation.trim().take(72)
                         entityBuilder.setDevice(
                             World.DeviceComponent.newBuilder()
