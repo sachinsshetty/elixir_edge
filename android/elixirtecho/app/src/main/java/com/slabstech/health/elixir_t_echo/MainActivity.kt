@@ -36,8 +36,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.meshtastic.proto.MeshProtos
 import org.meshtastic.proto.Portnums
+import world.World
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.util.*
+import java.util.zip.GZIPOutputStream
 
 private const val RISK_GREEN = "green"
 private const val RISK_YELLOW = "yellow"
@@ -67,6 +70,14 @@ private fun parseRiskFromAiResult(aiResult: String): Pair<String, Float> {
 }
 
 private fun getRecommendationForRisk(risk: String): String = RECOMMENDATIONS[risk] ?: RECOMMENDATIONS[RISK_GREEN]!!
+
+/** Random GPS in Berlin Schönefeld area (lat 52.36–52.42, lon 13.48–13.56, alt 80–120 m). */
+private fun randomBerlinSchonefeldGps(): String {
+    val lat = 52.36 + kotlin.random.Random.nextDouble() * (52.42 - 52.36)
+    val lon = 13.48 + kotlin.random.Random.nextDouble() * (13.56 - 13.48)
+    val alt = 80 + kotlin.random.Random.nextInt(41)
+    return "%.4f, %.4f, %d".format(lat, lon, alt)
+}
 
 private fun escapeJson(s: String): String = s
     .replace("\\", "\\\\")
@@ -107,6 +118,10 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
     private var isSending by mutableStateOf(false)
     private var showAlertDialog by mutableStateOf(false)
     private var alertDialogMessage by mutableStateOf("")
+
+    // World tab state
+    private var worldSensorName by mutableStateOf("sensor-sachin-sachin")
+    private var worldGpsText by mutableStateOf("52.372, 13.50, 100")
 
     private val ACTION_USB_PERMISSION = "com.slabstech.health.elixir_t_echo.USB_PERMISSION"
     private val TAG = "TechoApp"
@@ -182,7 +197,13 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
                     onDisconnect = { disconnect() },
                     showAlertDialog = showAlertDialog,
                     alertDialogMessage = alertDialogMessage,
-                    onDismissAlert = { showAlertDialog = false; alertDialogMessage = "" }
+                    onDismissAlert = { showAlertDialog = false; alertDialogMessage = "" },
+                    worldSensorName = worldSensorName,
+                    onWorldSensorNameChange = { worldSensorName = it },
+                    worldGpsText = worldGpsText,
+                    onWorldGpsTextChange = { worldGpsText = it },
+                    onRandomBerlinSchonefeld = { worldGpsText = randomBerlinSchonefeldGps() },
+                    onSendWorldEntity = { sendWorldEntity() }
                 )
             }
         }
@@ -213,6 +234,8 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
             }
             val message = buildStructuredMessage(personName, input, risk, recommendation, alert)
             sendToMesh(message)
+            // Also send World entity (sensor name, GPS, and this health analysis) to mesh
+            sendWorldEntity()
             isSending = false
         }
     }
@@ -302,6 +325,96 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
                 withContext(Dispatchers.Main) { if (!isDestroyed) log("Sent to mesh: $text") }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { if (!isDestroyed) log("Send failed: ${e.message}") }
+            }
+        }
+    }
+
+    private fun sendWorldEntity() {
+        if (!isConnected) {
+            log("Connect device first")
+            return
+        }
+        val sensorId = worldSensorName.trim().ifBlank { "sensor-sachin-sachin" }
+        val parts = worldGpsText.split(",").map { it.trim() }
+        val lat = parts.getOrNull(0)?.toDoubleOrNull() ?: 52.372
+        val lon = parts.getOrNull(1)?.toDoubleOrNull() ?: 13.50
+        val alt = parts.getOrNull(2)?.toDoubleOrNull() ?: 100.0
+        // Attach last health analysis when available (best-effort; don't block send)
+        val hasHealthAnalysis = lastAiLevel.isNotBlank()
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val entityBuilder = World.Entity.newBuilder()
+                    .setId(sensorId)
+                    .setGeo(
+                        World.GeoSpatialComponent.newBuilder()
+                            .setLatitude(lat)
+                            .setLongitude(lon)
+                            .setAltitude(alt)
+                            .build()
+                    )
+                    .setSymbol(
+                        World.SymbolComponent.newBuilder()
+                            .setMilStd2525C("SFGPES----")
+                            .build()
+                    )
+                    .setPriority(World.Priority.PriorityRoutine)
+                if (hasHealthAnalysis) {
+                    try {
+                        val (healthRisk, _) = parseRiskFromAiResult(lastAiLevel)
+                        val healthRecommendation = getRecommendationForRisk(healthRisk)
+                        val healthAlert = healthRisk == RISK_YELLOW || healthRisk == RISK_RED
+                        // Keep payload small for mesh (~231 bytes max): short label + compact labels
+                        entityBuilder.setLabel("Risk: $healthRisk")
+                        val recShort = healthRecommendation.trim().take(72)
+                        entityBuilder.setDevice(
+                            World.DeviceComponent.newBuilder()
+                                .setState(World.DeviceState.DeviceStateActive)
+                                .putAllLabels(
+                                    mapOf(
+                                        "risk" to healthRisk,
+                                        "rec" to recShort,
+                                        "alert" to healthAlert.toString()
+                                    )
+                                )
+                                .build()
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Attach health to entity failed, sending without", e)
+                    }
+                }
+                val entity = entityBuilder.build()
+                val entityBytes = entity.toByteArray()
+                // Hydris wire format: 1 byte gzip flag (0=raw, 1=gzip) + payload. Use gzip when large for mesh limit (~231 bytes).
+                val (wirePayload, useGzip) = if (entityBytes.size > 200) {
+                    val out = ByteArrayOutputStream()
+                    GZIPOutputStream(out).use { it.write(entityBytes) }
+                    val compressed = out.toByteArray()
+                    ByteArray(1 + compressed.size).apply {
+                        this[0] = 1 // gzip = true
+                        compressed.copyInto(this, 1)
+                    } to true
+                } else {
+                    ByteArray(1 + entityBytes.size).apply {
+                        this[0] = 0
+                        entityBytes.copyInto(this, 1)
+                    } to false
+                }
+                val data = MeshProtos.Data.newBuilder()
+                    .setPortnum(Portnums.PortNum.HYDRIS_APP)
+                    .setPayload(com.google.protobuf.ByteString.copyFrom(wirePayload))
+                    .build()
+                val packet = MeshProtos.MeshPacket.newBuilder()
+                    .setTo(0xFFFFFFFF.toInt())
+                    .setDecoded(data)
+                    .setWantAck(true)
+                    .setId(kotlin.random.Random.nextInt(1, Int.MAX_VALUE))
+                    .build()
+                val toRadio = MeshProtos.ToRadio.newBuilder().setPacket(packet).build()
+                sendToRadio(toRadio)
+                withContext(Dispatchers.Main) { if (!isDestroyed) log("Sent World Entity ($sensorId) rawLen=${entityBytes.size} wireLen=${wirePayload.size} gzip=$useGzip") }
+            } catch (e: Exception) {
+                Log.e(TAG, "Send entity failed", e)
+                withContext(Dispatchers.Main) { if (!isDestroyed) log("Send entity failed: ${e.message}") }
             }
         }
     }
@@ -405,9 +518,16 @@ fun TechoScreen(
     onDisconnect: () -> Unit,
     showAlertDialog: Boolean,
     alertDialogMessage: String,
-    onDismissAlert: () -> Unit
+    onDismissAlert: () -> Unit,
+    worldSensorName: String,
+    onWorldSensorNameChange: (String) -> Unit,
+    worldGpsText: String,
+    onWorldGpsTextChange: (String) -> Unit,
+    onRandomBerlinSchonefeld: () -> Unit,
+    onSendWorldEntity: () -> Unit
 ) {
     var personDropdownExpanded by remember { mutableStateOf(false) }
+    var selectedTab by remember { mutableStateOf(0) }
     if (showAlertDialog) {
         AlertDialog(
             onDismissRequest = onDismissAlert,
@@ -430,7 +550,14 @@ fun TechoScreen(
             }
             Spacer(modifier = Modifier.height(10.dp))
             Text(statusText, style = MaterialTheme.typography.bodyMedium)
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(10.dp))
+            TabRow(selectedTabIndex = selectedTab) {
+                Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }, text = { Text("Health") })
+                Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }, text = { Text("World") })
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            when (selectedTab) {
+                0 -> {
             if (isModelLoading) {
                 Text("Loading AI model...", style = MaterialTheme.typography.bodyMedium)
             } else if (!isModelReady) {
@@ -488,6 +615,41 @@ fun TechoScreen(
                     Spacer(modifier = Modifier.height(12.dp))
                     Text("Last classification:", style = MaterialTheme.typography.labelMedium)
                     Text(lastAiLevel, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+                }
+            }
+                }
+                1 -> {
+                    Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                        Text("World Entity", style = MaterialTheme.typography.labelMedium)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = worldSensorName,
+                            onValueChange = onWorldSensorNameChange,
+                            label = { Text("Sensor name (entity ID)") },
+                            placeholder = { Text("e.g. sensor-sachin-sachin") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = worldGpsText,
+                            onValueChange = onWorldGpsTextChange,
+                            label = { Text("GPS coordinates") },
+                            placeholder = { Text("lat, lon, alt  e.g. 52.372, 13.50, 100") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = onRandomBerlinSchonefeld,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                        ) { Text("Random GPS (Berlin Schönefeld)") }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = onSendWorldEntity,
+                            enabled = isConnected,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Send entity to mesh") }
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(16.dp))
