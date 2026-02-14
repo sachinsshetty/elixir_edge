@@ -131,6 +131,28 @@ python ml/run_tflite_inference.py "HR average 88 bpm HR max 105 steps 5000"
 
 **On mobile:** Load the `.tflite` file and tokenizer (or replicate tokenization with the same vocab and max length 64). Run the interpreter; argmax of the 3 output logits gives the risk level index.
 
+### Use fine-tuned model on Android (MediaPipe TextClassifier)
+
+The app in `android/bert/` uses MediaPipe’s `TextClassifier` with a TFLite model in assets (same API as the reference [bert_classifier.tflite](https://storage.googleapis.com/mediapipe-models/text_classifier/bert_classifier/float32/1/bert_classifier.tflite)). To use **our** fine-tuned health-risk model as `model.tflite`:
+
+1. **Export for MediaPipe** (3-input BERT-style TFLite + optional metadata):
+
+   ```bash
+   pip install tensorflow transformers pandas
+   pip install tflite-support   # optional, for metadata + packed vocab/labels
+   python ml/export_to_tflite.py --for_mediapipe
+   ```
+
+2. **Use the output in the app:**
+   - Copy `ml/tflite/model.tflite` into the app’s assets as `model.tflite`  
+     (e.g. `android/elixirtecho/app/src/main/assets/model.tflite`; create `assets` if needed).
+   - The script may auto-copy there if that path exists.
+   - `TextClassificationManager.kt` already loads `model.tflite` from assets; no code change needed.
+
+3. **Labels:** The model outputs **green**, **yellow**, **red** (and optional recommendation text can be shown from the same labels).
+
+If `tflite-support` is not installed, the export still produces a 3-input `model.tflite`; for full MediaPipe compatibility (built-in tokenizer + labels), install `tflite-support` and re-run.
+
 ---
 
 ## Quick reference
@@ -142,6 +164,7 @@ python ml/run_tflite_inference.py "HR average 88 bpm HR max 105 steps 5000"
 | 3. Train model    | `python ml/finetune_mobilebert_health.py --epochs 5` | `ml/saved_model/` |
 | 4. Predict        | `python ml/predict_health_risk.py "vital text..."` | Risk + recommendation |
 | 5. Export TFLite  | `python ml/export_to_tflite.py` | `ml/tflite/*.tflite` + tokenizer |
+| 5b. Export for Android (MediaPipe) | `python ml/export_to_tflite.py --for_mediapipe` | `ml/tflite/model.tflite` → copy to app assets |
 
 ---
 

@@ -16,7 +16,9 @@ import java.io.IOException
 class TextClassifierManager(private val context: Context) {
 
     private var classifier: TextClassifier? = null
-    private val modelName = "model.tflite" // MobileBERT .tflite file
+    // Use fine-tuned health-risk model: run `python ml/export_to_tflite.py --for_mediapipe` and copy
+    // ml/tflite/model.tflite to app src/main/assets/model.tflite (replaces reference bert_classifier.tflite)
+    private val modelName = "model.tflite"
 
     suspend fun loadModel(): Boolean = withContext(Dispatchers.IO) {
         try {

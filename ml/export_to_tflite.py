@@ -4,11 +4,16 @@ Export the health risk classifier to TFLite for mobile/edge deployment.
 
 1. Tries Hugging Face Optimum (if available) to export the PyTorch MobileBERT model.
 2. Fallback: trains a small Keras model on the same dataset and exports to TFLite.
-   Mobile apps can use the exported tokenizer (vocab) to preprocess text the same way.
+
+For Android with MediaPipe TextClassifier (same API as the reference
+bert_classifier.tflite): use --for_mediapipe to build a 3-input BERT-style TFLite
+(ids, mask, segment_ids) and attach metadata (vocab + labels) so the model can
+be used as model.tflite in app assets with no code changes.
 
 Usage:
   python ml/export_to_tflite.py
-  python ml/export_to_tflite.py --use_keras_only   # skip Optimum, use Keras fallback only
+  python ml/export_to_tflite.py --use_keras_only
+  python ml/export_to_tflite.py --for_mediapipe   # output: model.tflite for Android assets
 """
 import argparse
 import shutil
@@ -19,10 +24,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SAVED_MODEL = REPO_ROOT / "ml" / "saved_model"
 TFLITE_DIR = REPO_ROOT / "ml" / "tflite"
+ANDROID_ASSETS = REPO_ROOT / "android" / "elixirtecho" / "app" / "src" / "main" / "assets"
 DATASET_CSV = REPO_ROOT / "data" / "health_risk_dataset.csv"
 MAX_LEN = 64
 RISK_LABELS = ["green", "yellow", "red"]
 NUM_LABELS = len(RISK_LABELS)
+# BERT-style input names expected by MediaPipe TextClassifier
+INPUT_IDS_NAME = "ids"
+INPUT_MASK_NAME = "mask"
+INPUT_SEGMENT_IDS_NAME = "segment_ids"
+OUTPUT_LOGITS_NAME = "logits"
 
 
 def risk_to_id(risk: str) -> int:
@@ -66,6 +77,20 @@ def _copy_tokenizer_and_labels():
         (TFLITE_DIR / "labels.txt").write_text("\n".join(RISK_LABELS))
     except Exception as e:
         print("Could not copy tokenizer:", e)
+
+
+def _write_vocab_txt(tokenizer, out_path: Path) -> None:
+    """Write BERT-style vocab (one token per line, line index = token id)."""
+    vocab = getattr(tokenizer, "get_vocab", None)
+    vocab_dict = vocab() if callable(vocab) else (vocab if isinstance(vocab, dict) else {})
+    if not vocab_dict:
+        vocab_dict = getattr(tokenizer, "vocab", {}) or {}
+    default_size = getattr(tokenizer, "vocab_size", 30522) or 30522
+    size = max(default_size, max(vocab_dict.values()) + 1) if vocab_dict else default_size
+    id_to_token = {v: k for k, v in vocab_dict.items()}
+    lines = [id_to_token.get(i, f"[unused{i}]") for i in range(size)]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def export_keras_to_tflite() -> bool:
@@ -152,25 +177,232 @@ def export_keras_to_tflite() -> bool:
     return True
 
 
+def export_keras_for_mediapipe() -> bool:
+    """
+    Build a 3-input BERT-style TFLite (ids, mask, segment_ids) and optional
+    metadata so it can be used with MediaPipe TextClassifier on Android as model.tflite.
+    """
+    try:
+        import numpy as np
+        import pandas as pd
+        import tensorflow as tf
+        from transformers import AutoTokenizer
+    except ImportError as e:
+        print("MediaPipe export needs: pip install tensorflow transformers pandas", e)
+        return False
+
+    if not SAVED_MODEL.exists():
+        print("No saved model at", SAVED_MODEL, "- run finetune_mobilebert_health.py first.")
+        return False
+    if not DATASET_CSV.exists():
+        print("No dataset at", DATASET_CSV, "- run data/build_health_risk_dataset.py first.")
+        return False
+
+    print("Loading tokenizer and dataset...")
+    tokenizer = AutoTokenizer.from_pretrained(str(SAVED_MODEL))
+    df = pd.read_csv(DATASET_CSV)
+    texts = df["text"].astype(str).tolist()
+    labels = [risk_to_id(r) for r in df["risk_level"]]
+
+    enc = tokenizer(
+        texts,
+        padding="max_length",
+        truncation=True,
+        max_length=MAX_LEN,
+        return_tensors="np",
+    )
+    input_ids = np.array(enc["input_ids"], dtype=np.int32)
+    attention_mask = np.array(enc["attention_mask"], dtype=np.int32)
+    token_type_ids = np.array(enc.get("token_type_ids", np.zeros_like(input_ids)), dtype=np.int32)
+    labels_np = np.array(labels, dtype=np.int32)
+    if len(texts) < 100:
+        input_ids = np.tile(input_ids, (3, 1))
+        attention_mask = np.tile(attention_mask, (3, 1))
+        token_type_ids = np.tile(token_type_ids, (3, 1))
+        labels_np = np.tile(labels_np, 3)
+
+    vocab_size = getattr(tokenizer, "vocab_size", 30522) or 30522
+
+    # BERT-style 3 inputs so MediaPipe TextClassifier (and metadata tokenizer) can feed the model
+    print("Building Keras model (3 BERT inputs: ids, mask, segment_ids)...")
+    ids_inp = tf.keras.layers.Input(shape=(MAX_LEN,), dtype=tf.int32, name=INPUT_IDS_NAME)
+    mask_inp = tf.keras.layers.Input(shape=(MAX_LEN,), dtype=tf.int32, name=INPUT_MASK_NAME)
+    seg_inp = tf.keras.layers.Input(shape=(MAX_LEN,), dtype=tf.int32, name=INPUT_SEGMENT_IDS_NAME)
+    # Main path uses only ids; mask/segment are for API compatibility (must be in graph)
+    x = tf.keras.layers.Embedding(vocab_size, 128)(ids_inp)
+    x = tf.keras.layers.GlobalAveragePooling1D()(x)
+    x = tf.keras.layers.Dense(64, activation="relu")(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
+    logits = tf.keras.layers.Dense(NUM_LABELS, name=OUTPUT_LOGITS_NAME)(x)
+    # Tie mask/segment into graph so Keras accepts them (zero contribution, same shape as logits)
+    def _zero_from_inputs(inputs):
+        logits_t, mask_t, seg_t = inputs[0], inputs[1], inputs[2]
+        z = 0.0 * (tf.reduce_sum(tf.cast(mask_t, tf.float32)) + tf.reduce_sum(tf.cast(seg_t, tf.float32)))
+        return logits_t + z * tf.ones_like(logits_t)
+    logits = tf.keras.layers.Lambda(
+        _zero_from_inputs, name="logits_out", output_shape=(None, NUM_LABELS)
+    )([logits, mask_inp, seg_inp])
+    model = tf.keras.Model(inputs=[ids_inp, mask_inp, seg_inp], outputs=logits)
+    model.compile(
+        optimizer="adam",
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=["accuracy"],
+    )
+
+    print("Training Keras model...")
+    model.fit(
+        [input_ids, attention_mask, token_type_ids],
+        labels_np,
+        epochs=8,
+        batch_size=8,
+        validation_split=0.15,
+        verbose=1,
+    )
+
+    TFLITE_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("Converting to TFLite (3 inputs, 1 output)...")
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    tflite_model = converter.convert()
+    base_tflite = TFLITE_DIR / "health_risk_classifier_3input.tflite"
+    base_tflite.write_bytes(tflite_model)
+    print("Wrote", base_tflite)
+
+    # Vocab in BERT format (one token per line) for metadata tokenizer
+    vocab_path = TFLITE_DIR / "vocab.txt"
+    _write_vocab_txt(tokenizer, vocab_path)
+    print("Wrote", vocab_path)
+
+    labels_path = TFLITE_DIR / "labels.txt"
+    labels_path.write_text("\n".join(RISK_LABELS))
+
+    # Attach metadata and pack vocab + labels into model.tflite for Android
+    out_model = TFLITE_DIR / "model.tflite"
+    if _attach_mediapipe_metadata(base_tflite, vocab_path, labels_path, out_model):
+        print("Wrote MediaPipe-ready", out_model)
+        _copy_to_android_assets(out_model)
+    else:
+        # No metadata: still copy 3-input TFLite as model.tflite; app may need custom path or metadata added later
+        shutil.copy(base_tflite, out_model)
+        print("Wrote", out_model, "(no metadata attached; install tflite-support for full MediaPipe compatibility)")
+        _copy_to_android_assets(out_model)
+
+    tokenizer.save_pretrained(str(TFLITE_DIR))
+    (TFLITE_DIR / "README_mediapipe.txt").write_text(
+        "model.tflite: 3 inputs (ids, mask, segment_ids) shape (1, 64) int32; output (logits) (1, 3) float32.\n"
+        "For Android: put model.tflite in app/src/main/assets/ (as model.tflite).\n"
+        "Labels: green, yellow, red. If metadata was attached, MediaPipe TextClassifier uses it as-is."
+    )
+    return True
+
+
+def _attach_mediapipe_metadata(
+    tflite_path: Path, vocab_path: Path, labels_path: Path, out_path: Path
+) -> bool:
+    """Attach TFLite metadata (BERT tokenizer + output labels) and pack associated files. Returns True if done."""
+    try:
+        from tflite_support import metadata
+        from tflite_support import metadata_schema_py_generated as schema
+    except ImportError:
+        return False
+
+    # Populator may modify in place; work on a copy so we don't alter base_tflite
+    shutil.copy(tflite_path, out_path)
+
+    # Build metadata: subgraph with output label file + input BERT tokenizer
+    model_meta = schema.ModelMetadataT()
+    model_meta.name = "Health risk classifier"
+    model_meta.description = "Green/yellow/red risk from vital-sign text (HR, SpO2, steps, etc.)"
+    model_meta.version = "1.0"
+    model_meta.author = "Elixir Edge"
+    model_meta.license = ""
+
+    subgraph = schema.SubGraphMetadataT()
+    subgraph.input_tensor_metadata = []
+    subgraph.output_tensor_metadata = []
+
+    # Output tensor: logits with TENSOR_AXIS_LABELS
+    out_meta = schema.TensorMetadataT()
+    out_meta.name = OUTPUT_LOGITS_NAME
+    out_meta.description = "Logits for green, yellow, red"
+    out_meta.content = schema.ContentT()
+    out_meta.content.content_properties = schema.FeaturePropertiesT()
+    label_file = schema.AssociatedFileT()
+    label_file.name = "labels.txt"
+    label_file.description = "Risk level labels"
+    label_file.type = schema.AssociatedFileType.TENSOR_AXIS_LABELS
+    out_meta.associated_files = [label_file]
+    subgraph.output_tensor_metadata = [out_meta]
+
+    # Input process unit: BERT tokenizer with vocab (so MediaPipe can tokenize raw text)
+    vocab_af = schema.AssociatedFileT()
+    vocab_af.name = "vocab.txt"
+    vocab_af.description = "WordPiece vocabulary"
+    vocab_af.type = schema.AssociatedFileType.VOCABULARY
+    bert_opts = schema.BertTokenizerOptionsT()
+    bert_opts.vocab_file = [vocab_af]
+    process_unit = schema.ProcessUnitT()
+    process_unit.options = bert_opts
+    subgraph.input_process_units = [process_unit]
+
+    model_meta.subgraph_metadata = [subgraph]
+
+    try:
+        builder = schema.ModelMetadataCreateFromT(model_meta)
+        metadata_buf = bytes(builder.Finish())
+    except AttributeError:
+        # Schema API may differ; try alternate construction
+        return False
+
+    populator = metadata.MetadataPopulator.with_model_file(str(out_path))
+    populator.load_metadata_buffer(metadata_buf)
+    populator.load_associated_files([str(labels_path), str(vocab_path)])
+    populator.populate()
+    return True
+
+
+def _copy_to_android_assets(model_path: Path) -> None:
+    """Copy model.tflite to Android app assets if the assets dir exists."""
+    if not ANDROID_ASSETS.exists():
+        return
+    dest = ANDROID_ASSETS / "model.tflite"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(model_path, dest)
+    print("Copied to", dest)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export health risk model to TFLite")
     parser.add_argument("--use_keras_only", action="store_true", help="Skip Optimum, use Keras fallback only")
+    parser.add_argument(
+        "--for_mediapipe",
+        action="store_true",
+        help="Build 3-input BERT-style TFLite + metadata for Android MediaPipe TextClassifier (output: model.tflite)",
+    )
     args = parser.parse_args()
 
     TFLITE_DIR.mkdir(parents=True, exist_ok=True)
 
-    if args.use_keras_only:
+    if args.for_mediapipe:
+        ok = export_keras_for_mediapipe()
+        if ok:
+            print("\nDone. For Android: use ml/tflite/model.tflite as model.tflite in app assets.")
+            print("  Copy to android/.../app/src/main/assets/model.tflite (or run export; it may auto-copy).")
+    elif args.use_keras_only:
         ok = export_keras_to_tflite()
+        if ok:
+            print("\nDone. TFLite output:", TFLITE_DIR)
+            print("  - health_risk_classifier.tflite")
+            print("  - tokenizer files + labels.txt for mobile preprocessing")
     else:
         ok = try_optimum_export()
         if not ok:
             print("Falling back to Keras model + TFLite export...")
             ok = export_keras_to_tflite()
-
-    if ok:
-        print("\nDone. TFLite output:", TFLITE_DIR)
-        print("  - health_risk_classifier.tflite (or from Optimum)")
-        print("  - tokenizer files + labels.txt for mobile preprocessing")
+        if ok:
+            print("\nDone. TFLite output:", TFLITE_DIR)
+            print("  - health_risk_classifier.tflite (or from Optimum)")
+            print("  - tokenizer files + labels.txt for mobile preprocessing")
     return 0 if ok else 1
 
 
