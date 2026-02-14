@@ -1,0 +1,6 @@
+# ML / MobileBERT fine-tuning (health risk classification)
+# Uses PyTorch; TF MobileBERT was removed in recent transformers.
+# Install: pip install -r requirements-ml.txt
+torch>=2.0
+transformers>=4.30
+pandas>=2.0
