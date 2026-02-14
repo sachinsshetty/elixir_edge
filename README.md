@@ -103,6 +103,36 @@ python ml/run_inference_examples.py
 
 ---
 
+## 5. Export to TFLite (for mobile/edge)
+
+Exports the classifier to TFLite so it can run on Android/iOS or other edge devices.
+
+**Run:**
+
+```bash
+pip install tensorflow transformers   # for Keras fallback
+python ml/export_to_tflite.py
+```
+
+Optional: `pip install optimum[exporters-tf]` to try exporting the PyTorch MobileBERT via Optimum first. If that fails (e.g. TF MobileBERT not available), the script automatically trains a small Keras model on the same dataset and exports it to TFLite.
+
+**Output:** `ml/tflite/`
+
+- `health_risk_classifier.tflite` — model (input: `(1, 64)` int32 token IDs; output: `(1, 3)` float32 logits).
+- Tokenizer files (vocab, config) — use the same preprocessing on device.
+- `labels.txt` — green, yellow, red (indices 0, 1, 2).
+- `README.txt` — input/output shapes and usage notes.
+
+**Test TFLite locally:**
+
+```bash
+python ml/run_tflite_inference.py "HR average 88 bpm HR max 105 steps 5000"
+```
+
+**On mobile:** Load the `.tflite` file and tokenizer (or replicate tokenization with the same vocab and max length 64). Run the interpreter; argmax of the 3 output logits gives the risk level index.
+
+---
+
 ## Quick reference
 
 | Step | Command | Output |
@@ -111,6 +141,7 @@ python ml/run_inference_examples.py
 | 2. Build dataset   | `python data/build_health_risk_dataset.py` | `data/health_risk_dataset.csv` |
 | 3. Train model    | `python ml/finetune_mobilebert_health.py --epochs 5` | `ml/saved_model/` |
 | 4. Predict        | `python ml/predict_health_risk.py "vital text..."` | Risk + recommendation |
+| 5. Export TFLite  | `python ml/export_to_tflite.py` | `ml/tflite/*.tflite` + tokenizer |
 
 ---
 

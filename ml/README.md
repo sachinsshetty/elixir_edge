@@ -18,7 +18,14 @@ Fine-tunes **MobileBERT** (PyTorch) on wearable health text to predict **risk le
    ```
    Saves model and tokenizer under `ml/saved_model/`.
 
-3. **Use in code**: load with `transformers` and map predicted class to recommendation (see script’s example inference at the end).
+3. **Inference** (PyTorch): `python ml/predict_health_risk.py "vital text..."`
+
+4. **Export to TFLite** (for mobile):
+   ```bash
+   pip install tensorflow transformers
+   python ml/export_to_tflite.py
+   ```
+   Writes `ml/tflite/health_risk_classifier.tflite` plus tokenizer and `labels.txt`. Optionally install `optimum[exporters-tf]` to try exporting the PyTorch BERT via Optimum; otherwise a small Keras model is trained and exported. Test with `python ml/run_tflite_inference.py "vital text..."`.
 
 ## Challenge alignment
 
