@@ -1,0 +1,18 @@
+text,risk_level,recommendation
+HR average 67 bpm HR max 67 bpm sleep 1h24m,green,Continue normal activity. Stay hydrated.
+sleep 0h21m,green,Continue normal activity. Stay hydrated.
+HR average 95 bpm HR max 96 bpm SpO2 96 percent,yellow,Monitor vital signs. Consider rest and hydration soon.
+sleep 3h6m,green,Continue normal activity. Stay hydrated.
+sleep 2h45m,green,Continue normal activity. Stay hydrated.
+sleep 0h54m,green,Continue normal activity. Stay hydrated.
+sleep 0h20m,green,Continue normal activity. Stay hydrated.
+sleep 2h3m,green,Continue normal activity. Stay hydrated.
+HR average 82 bpm HR max 105 bpm resting HR 69 bpm steps 2276 active 17 minutes calories 175,yellow,Monitor vital signs. Consider rest and hydration soon.
+HR average 88 bpm HR max 93 bpm resting HR 83 bpm steps 1820 active 10 minutes calories 111,yellow,Monitor vital signs. Consider rest and hydration soon.
+HR average 68 bpm HR max 103 bpm resting HR 59 bpm steps 24 calories 35,yellow,Monitor vital signs. Consider rest and hydration soon.
+HR average 78 bpm HR max 86 bpm,green,Continue normal activity. Stay hydrated.
+HR average 77 bpm HR max 104 bpm resting HR 66 bpm steps 230 active 1 minutes calories 308,yellow,Monitor vital signs. Consider rest and hydration soon.
+HR average 80 bpm HR max 100 bpm resting HR 68 bpm steps 3021 active 18 minutes calories 549,green,Continue normal activity. Stay hydrated.
+HR average 73 bpm HR max 105 bpm resting HR 64 bpm steps 3189 active 13 minutes calories 309,yellow,Monitor vital signs. Consider rest and hydration soon.
+HR average 82 bpm HR max 100 bpm resting HR 71 bpm steps 2968 active 15 minutes calories 405,green,Continue normal activity. Stay hydrated.
+HR average 85 bpm HR max 107 bpm resting HR 76 bpm steps 2006 active 9 minutes calories 246,yellow,Monitor vital signs. Consider rest and hydration soon.
