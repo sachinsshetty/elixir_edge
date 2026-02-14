@@ -11,6 +11,11 @@ class MeshtasticFramer {
 
     private val buf = ByteArrayOutputStream()
 
+    /** Clear any partial buffered data. Call when (re)connecting to avoid desync. */
+    fun reset() {
+        buf.reset()
+    }
+
     fun frame(payload: ByteArray): ByteArray {
         require(payload.size <= MAX_LEN) { "Payload too large: ${payload.size}" }
         val out = ByteArray(4 + payload.size)

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,26 +29,67 @@ import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import com.hoho.android.usbserial.util.SerialInputOutputManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.meshtastic.proto.MeshProtos
 import org.meshtastic.proto.Portnums
-// Try standard import. If this fails, your proto package is different.
-// import org.meshtastic.proto.world.World
 import java.io.IOException
 import java.util.*
 
-data class ReceivedMessage(
-    val from: String,
-    val text: String,
-    val timestamp: Long,
-    val isFromMe: Boolean = false
+private const val RISK_GREEN = "green"
+private const val RISK_YELLOW = "yellow"
+private const val RISK_RED = "red"
+
+private val RECOMMENDATIONS = mapOf(
+    RISK_GREEN to "Continue normal activity. Stay hydrated.",
+    RISK_YELLOW to "Monitor vital signs. Consider rest and hydration soon.",
+    RISK_RED to "Heat stress or fatigue risk. Rest and rehydrate. Seek shade. Recommend rest in 10 min."
 )
+
+private fun parseRiskFromAiResult(aiResult: String): Pair<String, Float> {
+    var risk = RISK_GREEN
+    var confidence = 0f
+    val normalized = aiResult.trim().lowercase()
+    if (normalized.contains(RECOMMENDATIONS[RISK_RED]!!.lowercase())) risk = RISK_RED
+    else if (normalized.contains(RECOMMENDATIONS[RISK_YELLOW]!!.lowercase())) risk = RISK_YELLOW
+    else if (normalized.contains(RECOMMENDATIONS[RISK_GREEN]!!.lowercase())) risk = RISK_GREEN
+    val lines = aiResult.split("\n")
+    for (line in lines) {
+        if (line.startsWith("Confidence:", ignoreCase = true)) {
+            val num = line.replace(Regex("[^0-9.]+"), "").trim()
+            confidence = num.toFloatOrNull() ?: 0f
+        }
+    }
+    return risk to confidence
+}
+
+private fun getRecommendationForRisk(risk: String): String = RECOMMENDATIONS[risk] ?: RECOMMENDATIONS[RISK_GREEN]!!
+
+private fun escapeJson(s: String): String = s
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+    .replace("\n", " ")
+    .replace("\r", "")
+
+private fun buildStructuredMessage(
+    person: String,
+    input: String,
+    risk: String,
+    analysis: String,
+    alert: Boolean
+): String {
+    val ts = System.currentTimeMillis() / 1000
+    return """{"v":1,"person":"${escapeJson(person)}","ts":$ts,"risk":"$risk","analysis":"${escapeJson(analysis)}","alert":$alert,"input":"${escapeJson(input)}"}"""
+}
 
 class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
 
     private var serialPort: UsbSerialPort? = null
     private var ioManager: SerialInputOutputManager? = null
+    private var heartbeatJob: Job? = null
     private val framer = MeshtasticFramer()
     private lateinit var aiManager: TextClassifierManager
 
@@ -56,17 +98,24 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
     private var logText by mutableStateOf("")
     private var isConnected by mutableStateOf(false)
     private var myNodeNum by mutableStateOf<Int?>(null)
-    private var receivedMessages by mutableStateOf(listOf<ReceivedMessage>())
 
-    // AI State
+    // Health + AI State
     private var isModelLoading by mutableStateOf(false)
     private var isModelReady by mutableStateOf(false)
-    private var aiPromptText by mutableStateOf("")
-    private var aiResponseText by mutableStateOf("")
-    private var isGenerating by mutableStateOf(false)
+    private var healthInputText by mutableStateOf("")
+    private var lastAiLevel by mutableStateOf("")
+    private var isSending by mutableStateOf(false)
+    private var showAlertDialog by mutableStateOf(false)
+    private var alertDialogMessage by mutableStateOf("")
 
     private val ACTION_USB_PERMISSION = "com.slabstech.health.elixir_t_echo.USB_PERMISSION"
     private val TAG = "TechoApp"
+    private val MAX_LOG_CHARS = 50_000
+
+    companion object {
+        val PEOPLE = listOf("Person 1", "Person 2", "Person 3")
+    }
+    private var selectedPersonIndex by mutableStateOf(0)
 
     private val usbPermissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -101,7 +150,7 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
             isModelLoading = true
             isModelReady = aiManager.loadModel()
             isModelLoading = false
-            if (isModelReady) log("BERT Model loaded") else log("AI Model failed")
+            if (isModelReady) log("AI model loaded") else log("AI model failed")
         }
 
         val filter = IntentFilter(ACTION_USB_PERMISSION)
@@ -119,23 +168,21 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
                     logText = logText,
                     isConnected = isConnected,
                     myNodeNum = myNodeNum,
-                    receivedMessages = receivedMessages,
-
+                    people = PEOPLE,
+                    selectedPersonIndex = selectedPersonIndex,
+                    onPersonSelect = { selectedPersonIndex = it },
+                    healthInput = healthInputText,
+                    onHealthInputChange = { healthInputText = it },
+                    lastAiLevel = lastAiLevel,
                     isModelLoading = isModelLoading,
                     isModelReady = isModelReady,
-                    aiPrompt = aiPromptText,
-                    aiResponse = aiResponseText,
-                    isGenerating = isGenerating,
-                    onAiPromptChange = { aiPromptText = it },
-                    onGenerateAiResponse = { generateAiAnalysis() },
-
+                    isSending = isSending,
+                    onClassifyAndSend = { classifyAndSendToMesh() },
                     onConnect = { findAndRequestUsbPermission() },
                     onDisconnect = { disconnect() },
-                    onSendMessage = { msg -> sendTextMessage(msg) },
-                    // Restored functions
-                    onSendWorldEntity = { sendWorldEntity() },
-                    onSendSensorEntity = { sendSensorEntity() },
-                    onClearMessages = { receivedMessages = emptyList() }
+                    showAlertDialog = showAlertDialog,
+                    alertDialogMessage = alertDialogMessage,
+                    onDismissAlert = { showAlertDialog = false; alertDialogMessage = "" }
                 )
             }
         }
@@ -143,13 +190,30 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
         intent?.let { handleIntent(it) }
     }
 
-    private fun generateAiAnalysis() {
-        if (aiPromptText.isBlank() || !isModelReady) return
-        isGenerating = true
-        aiResponseText = ""
+    private fun classifyAndSendToMesh() {
+        val input = healthInputText.trim()
+        if (input.isBlank() || !isModelReady || !isConnected) {
+            log(if (!isConnected) "Connect device first" else "Enter health parameters")
+            return
+        }
+        isSending = true
+        lastAiLevel = ""
+        showAlertDialog = false
         lifecycleScope.launch {
-            aiManager.classify(aiPromptText).collect { aiResponseText = it }
-            isGenerating = false
+            var aiResult = ""
+            aiManager.classify(input).collect { aiResult = it }
+            lastAiLevel = aiResult
+            val personName = PEOPLE.getOrNull(selectedPersonIndex) ?: PEOPLE.first()
+            val (risk, _) = parseRiskFromAiResult(aiResult)
+            val recommendation = getRecommendationForRisk(risk)
+            val alert = risk == RISK_YELLOW || risk == RISK_RED
+            if (alert) {
+                alertDialogMessage = recommendation
+                showAlertDialog = true
+            }
+            val message = buildStructuredMessage(personName, input, risk, recommendation, alert)
+            sendToMesh(message)
+            isSending = false
         }
     }
 
@@ -195,12 +259,14 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
                 val port = driver.ports.firstOrNull() ?: return@launch
                 port.open(connection)
                 port.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+                framer.reset()
                 serialPort = port
                 ioManager = SerialInputOutputManager(port, this@MainActivity).also { it.start() }
                 withContext(Dispatchers.Main) {
                     isConnected = true
                     setStatus("Connected")
                     requestDeviceConfig()
+                    startHeartbeat()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { setStatus("Error: ${e.message}") }
@@ -217,7 +283,7 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
         } catch (_: Exception) {}
     }
 
-    private fun sendTextMessage(text: String) {
+    private fun sendToMesh(text: String) {
         if (text.isBlank()) return
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -233,92 +299,9 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
                     .build()
                 val toRadio = MeshProtos.ToRadio.newBuilder().setPacket(packet).build()
                 sendToRadio(toRadio)
-                withContext(Dispatchers.Main) { log("Sent: $text") }
+                withContext(Dispatchers.Main) { if (!isDestroyed) log("Sent to mesh: $text") }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { log("Send failed") }
-            }
-        }
-    }
-
-    // RESTORED: Sending World Entity
-    // NOTE: This requires 'world.proto' to be compiled into 'world.World' package
-    private fun sendWorldEntity() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                // If 'world' is unresolved, verify your .proto file package!
-                // Trying generic 'world.World' as per typical proto generation
-                val entity = world.World.Entity.newBuilder()
-                    .setId("lilygo-techo-001")
-                    .setLabel("T-Echo Drone Node")
-                    .setPriority(world.World.Priority.PriorityRoutine)
-                    .setGeo(world.World.GeoSpatialComponent.newBuilder()
-                        .setLongitude(8.6821)
-                        .setLatitude(50.1109)
-                        .setAltitude(100.0)
-                        .build())
-                    .build()
-
-                val entityBytes = entity.toByteArray()
-                val data = MeshProtos.Data.newBuilder()
-                    .setPortnum(Portnums.PortNum.PRIVATE_APP)
-                    .setPayload(com.google.protobuf.ByteString.copyFrom(entityBytes))
-                    .build()
-
-                val packet = MeshProtos.MeshPacket.newBuilder()
-                    .setTo(0xFFFFFFFF.toInt())
-                    .setDecoded(data)
-                    .setWantAck(true)
-                    .setId(kotlin.random.Random.nextInt(1, Int.MAX_VALUE))
-                    .build()
-
-                val toRadio = MeshProtos.ToRadio.newBuilder().setPacket(packet).build()
-                sendToRadio(toRadio)
-                withContext(Dispatchers.Main) { log("Sent World Entity") }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    log("Failed to send entity: ${e.message}")
-                    Log.e(TAG, "Entity error", e)
-                }
-            }
-        }
-    }
-
-    // RESTORED: Sending Sensor Entity
-    private fun sendSensorEntity() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val entity = world.World.Entity.newBuilder()
-                    .setId("sensor-sachin")
-                    .setLabel("Sensor Sachin Node")
-                    .setPriority(world.World.Priority.PriorityRoutine)
-                    .setGeo(world.World.GeoSpatialComponent.newBuilder()
-                        .setLatitude(50.52)
-                        .setLongitude(23.40)
-                        .setAltitude(100.0)
-                        .build())
-                    .setSymbol(world.World.SymbolComponent.newBuilder()
-                        .setMilStd2525C("SFGPES----")
-                        .build())
-                    .build()
-
-                val entityBytes = entity.toByteArray()
-                val data = MeshProtos.Data.newBuilder()
-                    .setPortnum(Portnums.PortNum.PRIVATE_APP)
-                    .setPayload(com.google.protobuf.ByteString.copyFrom(entityBytes))
-                    .build()
-
-                val packet = MeshProtos.MeshPacket.newBuilder()
-                    .setTo(0xFFFFFFFF.toInt())
-                    .setDecoded(data)
-                    .setWantAck(true)
-                    .setId(kotlin.random.Random.nextInt(1, Int.MAX_VALUE))
-                    .build()
-
-                val toRadio = MeshProtos.ToRadio.newBuilder().setPacket(packet).build()
-                sendToRadio(toRadio)
-                withContext(Dispatchers.Main) { log("Sent Sensor Entity") }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) { log("Failed sensor: ${e.message}") }
+                withContext(Dispatchers.Main) { if (!isDestroyed) log("Send failed: ${e.message}") }
             }
         }
     }
@@ -330,40 +313,48 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
             val framed = framer.frame(payload)
             port.write(framed, 1000)
         } catch (e: IOException) {
-            runOnUiThread { log("Write error") }
+            runOnUiThread { if (!isDestroyed) log("Write error") }
         }
     }
 
     override fun onNewData(data: ByteArray) {
+        if (data.isEmpty()) return
+        // PROTO mode: framed FromRadio packets
         framer.feed(data) { payload ->
             try {
                 val fromRadio = MeshProtos.FromRadio.parseFrom(payload)
-                runOnUiThread { handleFromRadio(fromRadio) }
-            } catch (_: Exception) {}
+                runOnUiThread {
+                    if (!isDestroyed) handleFromRadio(fromRadio)
+                }
+            } catch (e: Exception) {
+                if (!isDestroyed) runOnUiThread { log("Rx parse error: ${e.message}") }
+            }
         }
     }
 
     override fun onRunError(e: Exception) {
-        runOnUiThread { disconnectInternal(true) }
+        runOnUiThread {
+            if (!isDestroyed) disconnectInternal(true)
+        }
     }
 
     private fun handleFromRadio(fromRadio: MeshProtos.FromRadio) {
+        if (isDestroyed) return
         if (fromRadio.hasMyInfo()) myNodeNum = fromRadio.myInfo.myNodeNum
-        if (fromRadio.hasPacket()) {
-            val packet = fromRadio.packet
-            if (packet.hasDecoded() && packet.decoded.portnum == Portnums.PortNum.TEXT_MESSAGE_APP) {
-                val text = packet.decoded.payload.toStringUtf8()
-                val fromNode = "0x${packet.from.toString(16)}"
-                val msg = ReceivedMessage(fromNode, text, System.currentTimeMillis(), false)
-                receivedMessages = receivedMessages + msg
-            }
-            // Parse entities from PRIVATE_APP
-            if (packet.hasDecoded() && packet.decoded.portnum == Portnums.PortNum.PRIVATE_APP) {
+    }
+
+    private fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = lifecycleScope.launch(Dispatchers.IO) {
+            while (isActive && isConnected) {
+                delay(10_000L)
+                if (!isConnected) break
                 try {
-                    val bytes = packet.decoded.payload.toByteArray()
-                    // Try to parse as Entity to log it
-                    val entity = world.World.Entity.parseFrom(bytes)
-                    log("Rx Entity: ${entity.label} (${entity.id})")
+                    val toRadio = MeshProtos.ToRadio.newBuilder()
+                        .setHeartbeat(MeshProtos.Heartbeat.newBuilder().setNonce((System.currentTimeMillis() % 0xFFFF).toInt()).build())
+                        .build()
+                    sendToRadio(toRadio)
+                    Log.d(TAG, "Heartbeat sent")
                 } catch (_: Exception) {}
             }
         }
@@ -372,6 +363,8 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
     private fun disconnect() { disconnectInternal(true) }
 
     private fun disconnectInternal(keepLog: Boolean) {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         try { ioManager?.stop() } catch (_: Exception) {}
         ioManager = null
         try { serialPort?.close() } catch (_: Exception) {}
@@ -384,42 +377,50 @@ class MainActivity : ComponentActivity(), SerialInputOutputManager.Listener {
 
     private fun setStatus(s: String) { statusText = s }
     private fun log(message: String) {
+        if (isDestroyed) return
         val t = System.currentTimeMillis() % 100000
-        logText = "[$t] $message\n$logText"
+        logText = "[$t] $message\n$logText".take(MAX_LOG_CHARS)
         Log.d(TAG, message)
     }
 }
 
-// ... [TechoScreen remains same] ...
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TechoScreen(
     statusText: String,
     logText: String,
     isConnected: Boolean,
     myNodeNum: Int?,
-    receivedMessages: List<ReceivedMessage>,
+    people: List<String>,
+    selectedPersonIndex: Int,
+    onPersonSelect: (Int) -> Unit,
+    healthInput: String,
+    onHealthInputChange: (String) -> Unit,
+    lastAiLevel: String,
     isModelLoading: Boolean,
     isModelReady: Boolean,
-    aiPrompt: String,
-    aiResponse: String,
-    isGenerating: Boolean,
-    onAiPromptChange: (String) -> Unit,
-    onGenerateAiResponse: () -> Unit,
+    isSending: Boolean,
+    onClassifyAndSend: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
-    onSendMessage: (String) -> Unit,
-    onSendWorldEntity: () -> Unit,
-    onSendSensorEntity: () -> Unit,
-    onClearMessages: () -> Unit
+    showAlertDialog: Boolean,
+    alertDialogMessage: String,
+    onDismissAlert: () -> Unit
 ) {
-    var messageText by remember { mutableStateOf("") }
-    var selectedTab by remember { mutableStateOf(0) }
-
+    var personDropdownExpanded by remember { mutableStateOf(false) }
+    if (showAlertDialog) {
+        AlertDialog(
+            onDismissRequest = onDismissAlert,
+            title = { Text("Risk alert", color = MaterialTheme.colorScheme.error) },
+            text = { Text(alertDialogMessage) },
+            confirmButton = { Button(onClick = onDismissAlert) { Text("OK") } }
+        )
+    }
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column {
-                    Text("TEcho Meshtastic", style = MaterialTheme.typography.headlineSmall)
+                    Text("Health → Mesh", style = MaterialTheme.typography.headlineSmall)
                     myNodeNum?.let { Text("Node: 0x${it.toString(16)}", style = MaterialTheme.typography.bodySmall) }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -429,52 +430,70 @@ fun TechoScreen(
             }
             Spacer(modifier = Modifier.height(10.dp))
             Text(statusText, style = MaterialTheme.typography.bodyMedium)
-            Spacer(modifier = Modifier.height(14.dp))
-            TabRow(selectedTabIndex = selectedTab) {
-                Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }, text = { Text("Chat") })
-                Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }, text = { Text("Log") })
-                Tab(selected = selectedTab == 2, onClick = { selectedTab = 2 }, text = { Text("AI") })
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            Surface(modifier = Modifier.fillMaxWidth().weight(1f), color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small) {
-                when (selectedTab) {
-                    0 -> {
-                        Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
-                            Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                                receivedMessages.forEach { msg -> Text("${msg.from}: ${msg.text}", modifier = Modifier.padding(4.dp)) }
-                            }
-                            Row {
-                                OutlinedTextField(value = messageText, onValueChange = { messageText = it }, modifier = Modifier.weight(1f))
-                                Button(onClick = { onSendMessage(messageText); messageText = "" }, enabled = isConnected) { Text("Send") }
-                            }
-                            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                                Button(onClick = onSendWorldEntity, enabled = isConnected) { Text("World") }
-                                Button(onClick = onSendSensorEntity, enabled = isConnected) { Text("Sensor") }
-                            }
-                        }
-                    }
-                    1 -> Text(logText, modifier = Modifier.padding(10.dp).verticalScroll(rememberScrollState()), fontFamily = FontFamily.Monospace)
-                    2 -> {
-                        Column(modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
-                            if (isModelLoading) Text("Loading Model...")
-                            else if (isModelReady) {
-                                Text("BERT Ready", color = Color.Green)
-                                Spacer(modifier = Modifier.height(8.dp))
-                                OutlinedTextField(value = aiPrompt, onValueChange = onAiPromptChange, label = { Text("Text to Analyze") }, modifier = Modifier.fillMaxWidth())
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Button(onClick = onGenerateAiResponse, enabled = !isGenerating && aiPrompt.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-                                    Text(if (isGenerating) "Analyzing..." else "Classify")
+            Spacer(modifier = Modifier.height(16.dp))
+            if (isModelLoading) {
+                Text("Loading AI model...", style = MaterialTheme.typography.bodyMedium)
+            } else if (!isModelReady) {
+                Text("AI model failed", color = MaterialTheme.colorScheme.error)
+            } else {
+                Text("Person", style = MaterialTheme.typography.labelMedium)
+                Spacer(modifier = Modifier.height(4.dp))
+                ExposedDropdownMenuBox(
+                    expanded = personDropdownExpanded,
+                    onExpandedChange = { personDropdownExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = people.getOrNull(selectedPersonIndex) ?: "",
+                        onValueChange = {},
+                        readOnly = true,
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = personDropdownExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = personDropdownExpanded,
+                        onDismissRequest = { personDropdownExpanded = false }
+                    ) {
+                        people.forEachIndexed { index, name ->
+                            DropdownMenuItem(
+                                text = { Text(name) },
+                                onClick = {
+                                    onPersonSelect(index)
+                                    personDropdownExpanded = false
                                 }
-                                if (aiResponse.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                    Text(aiResponse)
-                                }
-                            } else {
-                                Text("Model Error", color = Color.Red)
-                            }
+                            )
                         }
                     }
                 }
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = healthInput,
+                    onValueChange = onHealthInputChange,
+                    label = { Text("Health parameters") },
+                    placeholder = { Text("e.g. HR average 65 bpm HR max 85 SpO2 98 percent steps 2000 active 5 minutes sleep 7h") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = false,
+                    minLines = 2
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = onClassifyAndSend,
+                    enabled = isConnected && healthInput.isNotBlank() && !isSending,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (isSending) "Classifying & sending…" else "Classify & send to mesh")
+                }
+                if (lastAiLevel.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Last classification:", style = MaterialTheme.typography.labelMedium)
+                    Text(lastAiLevel, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("Log", style = MaterialTheme.typography.labelMedium)
+            Surface(modifier = Modifier.fillMaxWidth().weight(1f), color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small) {
+                Text(logText, modifier = Modifier.padding(10.dp).verticalScroll(rememberScrollState()), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
