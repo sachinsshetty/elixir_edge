@@ -22,15 +22,12 @@ class TextClassifierManager(private val context: Context) {
 
     suspend fun loadModel(): Boolean = withContext(Dispatchers.IO) {
         try {
-            // MobileBERT is small (~25MB), so we can theoretically load from assets directly
-            // depending on API, but copying is safer for alignment issues.
             val modelFile = File(context.filesDir, modelName)
-            if (!modelFile.exists()) {
-                Log.d("BERTManager", "Copying MobileBERT model...")
-                context.assets.open(modelName).use { input ->
-                    FileOutputStream(modelFile).use { output ->
-                        input.copyTo(output)
-                    }
+            // Always copy from assets so updated model.tflite is used after new installs/builds.
+            Log.d("BERTManager", "Copying model from assets...")
+            context.assets.open(modelName).use { input ->
+                FileOutputStream(modelFile).use { output ->
+                    input.copyTo(output)
                 }
             }
 
@@ -62,12 +59,14 @@ class TextClassifierManager(private val context: Context) {
                 classifier?.classify(text)
             }
 
-            // Format results
-            val topResult = results?.classificationResult()?.classifications()?.firstOrNull()?.categories()?.firstOrNull()
+            // Take category with highest score (order from API may not be by score)
+            val categories = results?.classificationResult()?.classifications()?.firstOrNull()?.categories() ?: emptyList()
+            val topResult = categories.maxByOrNull { it.score() }
             val category = topResult?.categoryName() ?: "Unknown"
             val score = topResult?.score() ?: 0f
+            val allScores = categories.joinToString { "${it.categoryName()}=${"%.2f".format(it.score())}" }
 
-            emit("Analysis: $category\nConfidence: ${"%.2f".format(score)}")
+            emit("Analysis: $category\nConfidence: ${"%.2f".format(score)}\n($allScores)")
         } catch (e: Exception) {
             emit("Error: ${e.message}")
         }

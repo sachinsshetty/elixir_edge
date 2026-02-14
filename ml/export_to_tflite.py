@@ -233,29 +233,38 @@ def export_keras_for_mediapipe() -> bool:
     x = tf.keras.layers.GlobalAveragePooling1D()(x)
     x = tf.keras.layers.Dense(64, activation="relu")(x)
     x = tf.keras.layers.Dropout(0.2)(x)
-    logits = tf.keras.layers.Dense(NUM_LABELS, name=OUTPUT_LOGITS_NAME)(x)
-    # Tie mask/segment into graph so Keras accepts them (zero contribution, same shape as logits)
+    logits = tf.keras.layers.Dense(NUM_LABELS)(x)
+    # MediaPipe expects "probability" output in [0,1]; output softmax so scores are proper probabilities.
+    probs = tf.keras.layers.Softmax(name=OUTPUT_LOGITS_NAME)(logits)
+    # Tie mask/segment into graph so Keras accepts them (zero contribution)
     def _zero_from_inputs(inputs):
-        logits_t, mask_t, seg_t = inputs[0], inputs[1], inputs[2]
+        p, mask_t, seg_t = inputs[0], inputs[1], inputs[2]
         z = 0.0 * (tf.reduce_sum(tf.cast(mask_t, tf.float32)) + tf.reduce_sum(tf.cast(seg_t, tf.float32)))
-        return logits_t + z * tf.ones_like(logits_t)
-    logits = tf.keras.layers.Lambda(
+        return p + z * tf.ones_like(p)
+    probs = tf.keras.layers.Lambda(
         _zero_from_inputs, name="logits_out", output_shape=(None, NUM_LABELS)
-    )([logits, mask_inp, seg_inp])
-    model = tf.keras.Model(inputs=[ids_inp, mask_inp, seg_inp], outputs=logits)
+    )([probs, mask_inp, seg_inp])
+    model = tf.keras.Model(inputs=[ids_inp, mask_inp, seg_inp], outputs=probs)
     model.compile(
         optimizer="adam",
-        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False),
         metrics=["accuracy"],
     )
 
-    print("Training Keras model...")
+    # Class weights so model doesn't collapse to green (index 0)
+    from collections import Counter
+    counts = Counter(labels_np)
+    total = len(labels_np)
+    class_weight = {i: total / (NUM_LABELS * counts.get(i, 1)) for i in range(NUM_LABELS)}
+
+    print("Training Keras model (with class weights)...")
     model.fit(
         [input_ids, attention_mask, token_type_ids],
         labels_np,
-        epochs=8,
+        epochs=12,
         batch_size=8,
         validation_split=0.15,
+        class_weight=class_weight,
         verbose=1,
     )
 
