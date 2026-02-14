@@ -17,6 +17,13 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            // Samsung A13 is 32-bit (armeabi-v7a).
+            // MediaPipe 0.10.27+ supports both 32-bit and 64-bit.
+            abiFilters.add("armeabi-v7a")
+            abiFilters.add("arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -38,6 +45,17 @@ android {
     buildFeatures {
         compose = true
     }
+    aaptOptions {
+        noCompress("bin", "task", "tflite")
+    }
+    // Critical for loading large native libraries on older/budget devices
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            pickFirsts.add("lib/armeabi-v7a/libllm_inference_engine_jni.so")
+            pickFirsts.add("lib/arm64-v8a/libllm_inference_engine_jni.so")
+        }
+    }
 }
 
 dependencies {
@@ -49,11 +67,15 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
-    
+
     // USB Serial and Protobuf
     implementation(libs.usb.serial)
     implementation(libs.protobuf.javalite)
-    
+
+    // MediaPipe LLM Inference
+    // MUST be 0.10.27 or higher for 32-bit (armeabi-v7a) support
+    //implementation("com.google.mediapipe:tasks-genai:0.10.27")
+    implementation("com.google.mediapipe:tasks-text:0.10.14")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -63,6 +85,7 @@ dependencies {
     debugImplementation(libs.androidx.ui.test.manifest)
 }
 
+// Add protobuf configuration
 protobuf {
     protoc {
         artifact = "com.google.protobuf:protoc:3.25.5"
