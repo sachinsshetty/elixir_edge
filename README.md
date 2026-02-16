@@ -3,6 +3,22 @@
 - [Challenge Docs](challange.md)
 - **Healthcare / Soldier Health**: Wearable vitals → health insights → risk classification (green/yellow/red) and recommendations.
 
+- [Demo Video](https://youtube.com/shorts/d0ErkfsR6Oc?feature=share)
+- [LinkedIn](https://www.linkedin.com/posts/sachinlabs_project-elixir-hardware-prototype-team-activity-7428581773028028416-98jJ)
+
+
+- Project : Casualty monitoring with on-device health analysis for soldiers and connected to command via secure mesh networks.
+
+- Solved Challenges :
+   1. Edge Soldier Health Monitoring by SAP Defense
+   2. Hacking at the edge by Project Q 
+
+- Workflow
+   - Extract health signals from Xiaomi Technology - Redmi Watch 5 Lite wearable device, 
+   - Analyse the data on device Samsung Electronics Android with fine-tuned Mobile-Bert using TensorFlow Lite and 
+   - Sent to Mesh via Lily-Go : T-Echo. 
+   - Command updated via - Project - Hydris Dashboard running on Docker, Inc via Serial USB-C to Lily-Go T-Deck.
+
 ---
 
 ## Setup
